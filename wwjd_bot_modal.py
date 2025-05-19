@@ -1,6 +1,6 @@
 import modal
-from fastapi import Request
 from pydantic import BaseModel
+import time
 
 app = modal.App("wwjd-bot")
 
@@ -10,90 +10,147 @@ image = modal.Image.debian_slim().pip_install(
     "transformers",
     "torch",
     "accelerate",
+    "bitsandbytes",
 )
 
 # Use a persistent volume to cache Hugging Face models
 model_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
 MODEL_DIR = "/root/.cache/huggingface"
 
-
-# Request model for structured Swagger input
 class VerseRequest(BaseModel):
     text: str
-
-
-@app.function(image=image)
-@modal.fastapi_endpoint(method="GET", docs=True)
-def show_url():
-    url = show_url.get_web_url()
-    print(f"WWJD Bot URL: {url}")
-    return {"url": url}
-
 
 @app.function(
     image=image,
     volumes={MODEL_DIR: model_volume},
     timeout=600,
-    gpu="T4"
+    gpu="T4",
+    secrets=[modal.Secret.from_name("huggingface-token")]
 )
 def match_verse(text: str):
-    from transformers import AutoTokenizer, AutoModelForCausalLM
+    from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
     import torch
     import os
     import re
+    import json
 
     os.environ["TRANSFORMERS_CACHE"] = MODEL_DIR
+    model_name = "mistralai/Mistral-7B-Instruct-v0.2"
+    token = os.environ.get("HUGGINGFACE_TOKEN")
+    from huggingface_hub import login
+    login(token)
 
-    model_name = "HuggingFaceH4/zephyr-7b-beta"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
-    model.to("cuda" if torch.cuda.is_available() else "cpu")
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_quant_type="nf4",
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        use_auth_token=token
+    )
+    tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        use_auth_token=token,
+        quantization_config=bnb_config,
+        device_map="auto",
+    )
+
     model.eval()
 
-    prompt = f"""<|system|>
-You are What Would Jesus Comment Bot, an AI that replies to social media posts by calling out hypocrisy using the Bible and Christian doctrine.
-
-A self-identified Christian wrote the following:
+    prompt = f"""<s>[INST] I need to analyze this statement to expose potential hypocrisy from a Christian biblical perspective:
 "{text}"
 
-Write a short, direct comment reply that exposes how this statement contradicts the teachings of Jesus or God. Use one Bible verse or Christian doctrine to support your response.
+The goal is to identify how this statement contradicts biblical teachings or values that would be important to Christians.
 
-Clearly display:
-1. The Bible verse reference (e.g., Matthew 25:35)
-2. The full verse text
-3. A short explanation that directly connects the verse to the contradiction — no preaching, no softening, no sermonizing.
+Generate a direct, pointed response that:
+1. Identifies a biblical verse that directly contradicts or challenges this statement
+2. Presents the full text of that verse
+3. Provides a brief, direct explanation showing the hypocrisy or contradiction between the statement and Christian values
 
-Keep it concise, bold, and formatted like a public comment reply.
-Output only the final comment — no labels, no extra formatting.
+Return your response as JSON with three fields:
+{{
+  "reference": "The Bible verse reference (e.g., Matthew 5:44)",
+  "verse": "The full text of the verse",
+  "explanation": "A direct explanation (1-2 sentences) showing how the statement contradicts this biblical teaching"
+}}
 
-<|assistant|>"""
+Be bold and direct in exposing the contradiction. Focus specifically on statements that claim Christian values but contradict biblical teachings. [/INST]"""
 
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    start_time = time.time()
+
     with torch.no_grad():
         output = model.generate(
             **inputs,
-            max_new_tokens=200,
-            temperature=0.7,
-            top_p=0.9
+            max_new_tokens=500,
+            temperature=0.2,
+            top_p=0.95,
+            do_sample=True,
+            repetition_penalty=1.2,
+            min_length=inputs.input_ids.shape[1] + 20,
+            pad_token_id=tokenizer.eos_token_id
         )
 
-    full_response = tokenizer.decode(output[0], skip_special_tokens=True)
+    generated_text = tokenizer.decode(output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
+    elapsed_time = time.time() - start_time
 
-    # Extract the verse components using regex
-    match = re.search(
-        r"1\.\s*(.*?)\n2\.\s*(.*?)\n3\.\s*(.*)",
-        full_response,
-        re.DOTALL
-    )
-    if match:
+    print("=== Prompt Sent ===")
+    print(prompt)
+    print("=== Model Output ===")
+    print(generated_text)
+    print(f"Response generated in {elapsed_time:.2f} seconds")
+
+    json_match = re.search(r'({[\s\S]*})', generated_text)
+
+    try:
+        if json_match:
+            json_str = json_match.group(1)
+            response_json = json.loads(json_str)
+
+            if all(k in response_json for k in ['reference', 'verse', 'explanation']):
+                return {
+                    "reference": response_json["reference"],
+                    "verse": response_json["verse"],
+                    "explanation": response_json["explanation"],
+                    "model": model_name,
+                    "generation_time": f"{elapsed_time:.2f} seconds"
+                }
+
+        reference_pattern = re.compile(r'"reference"\s*:\s*"([^"]+)"')
+        verse_pattern = re.compile(r'"verse"\s*:\s*"([^"]+)"')
+        explanation_pattern = re.compile(r'"explanation"\s*:\s*"([^"]+)"')
+
+        reference_match = reference_pattern.search(generated_text)
+        verse_match = verse_pattern.search(generated_text)
+        explanation_match = explanation_pattern.search(generated_text)
+
+        reference = reference_match.group(1) if reference_match else ""
+        verse = verse_match.group(1) if verse_match else ""
+        explanation = explanation_match.group(1) if explanation_match else ""
+
+        if reference or verse or explanation:
+            return {
+                "reference": reference,
+                "verse": verse,
+                "explanation": explanation,
+                "model": model_name,
+                "generation_time": f"{elapsed_time:.2f} seconds"
+            }
+
         return {
-            "verse": match.group(1).strip(),
-            "text": match.group(2).strip(),
-            "explanation": match.group(3).strip()
+            "reference": "",
+            "verse": "",
+            "explanation": generated_text,
+            "model": model_name,
+            "generation_time": f"{elapsed_time:.2f} seconds"
         }
 
-    return {"raw": full_response}
-
+    except Exception as e:
+        return {"error": f"Parsing failed: {str(e)}", "raw_output": generated_text}
 
 @app.function(image=image, gpu="any", timeout=600)
 @modal.fastapi_endpoint(method="POST", docs=True)
@@ -103,14 +160,14 @@ async def verse_api(body: VerseRequest):
     if not text:
         return {"error": "Missing 'text' field in request"}
 
-    return match_verse.remote(text)
-
-
-@app.local_entrypoint()
-def main(text: str = None):
-    if text:
-        print("Running WWJD Bot. This may take a few minutes on first run...")
+    try:
         result = match_verse.remote(text)
-        print(result)
-    else:
-        print("Please provide text with --text flag")
+        return {
+            "raw": {
+                "reference": result.get("reference", ""),
+                "verse": result.get("verse", ""),
+                "explanation": result.get("explanation", "")
+            }
+        }
+    except Exception as e:
+        return {"error": f"Processing failed: {str(e)}"}
