@@ -16,9 +16,11 @@ image = modal.Image.debian_slim().pip_install(
 model_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
 MODEL_DIR = "/root/.cache/huggingface"
 
+
 # Request model for structured Swagger input
 class VerseRequest(BaseModel):
     text: str
+
 
 @app.function(image=image)
 @modal.fastapi_endpoint(method="GET", docs=True)
@@ -26,6 +28,7 @@ def show_url():
     url = show_url.get_web_url()
     print(f"WWJD Bot URL: {url}")
     return {"url": url}
+
 
 @app.function(
     image=image,
@@ -48,17 +51,20 @@ def match_verse(text: str):
     model.eval()
 
     prompt = f"""<|system|>
-You are WWJD Bot, a moral assistant that uses Christian scripture to highlight hypocrisy.
+You are What Would Jesus Comment Bot, an AI that replies to social media posts by calling out hypocrisy using the Bible and Christian doctrine.
 
-<|user|>
-A person who identifies as Christian wrote the following statement:
-\"{text}\"
+A self-identified Christian wrote the following:
+"{text}"
 
-Find a Bible verse that challenges this statement based on Christian values. 
-Return:
-1. The Bible verse reference (e.g., Matthew 7:5)
-2. The verse text
-3. A 1–2 sentence explanation of why it contradicts the statement.
+Write a short, direct comment reply that exposes how this statement contradicts the teachings of Jesus or God. Use one Bible verse or Christian doctrine to support your response.
+
+Clearly display:
+1. The Bible verse reference (e.g., Matthew 25:35)
+2. The full verse text
+3. A short explanation that directly connects the verse to the contradiction — no preaching, no softening, no sermonizing.
+
+Keep it concise, bold, and formatted like a public comment reply.
+Output only the final comment — no labels, no extra formatting.
 
 <|assistant|>"""
 
@@ -88,6 +94,7 @@ Return:
 
     return {"raw": full_response}
 
+
 @app.function(image=image, gpu="any", timeout=600)
 @modal.fastapi_endpoint(method="POST", docs=True)
 async def verse_api(body: VerseRequest):
@@ -97,6 +104,7 @@ async def verse_api(body: VerseRequest):
         return {"error": "Missing 'text' field in request"}
 
     return match_verse.remote(text)
+
 
 @app.local_entrypoint()
 def main(text: str = None):
