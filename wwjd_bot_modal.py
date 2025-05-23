@@ -63,25 +63,25 @@ def match_verse(text: str):
 
     model.eval()
 
-    prompt = f"""<s>[INST] 
-    Analyze the following statement from the perspective of Christian teachings:
+    prompt = f"""<s>[INST]
+    Evaluate the following statement from a Christian biblical perspective:
 
     "{text}"
 
-    Determine whether the statement aligns with or contradicts biblical values, especially those emphasized by Jesus in the New Testament.
+    Determine whether this statement reflects or contradicts the values taught by Jesus and core Christian doctrine.
 
-    Respond with a concise, respectful comment that:
-    1. Cites a specific Bible verse that applies
-    2. Includes the full text of that verse
-    3. Explains—briefly and clearly—how the verse relates to the statement
+    If the statement conflicts with biblical teachings, generate a clear and direct response that:
+    1. Identifies a Bible verse that challenges the statement
+    2. Presents the full text of that verse
+    3. Provides a brief but pointed explanation that highlights the contradiction or hypocrisy in light of Christian values
 
-    The goal is to offer thoughtful moral insight, not judgment. The tone should be direct but compassionate, rooted in scripture and Christian principles of love, justice, and humility.
+    The tone should be respectful but unflinching—especially when the statement misrepresents Christian teaching or uses it to justify harm, exclusion, or hate.
 
-    Return the result in JSON format with three fields:
+    Return your response in JSON format with these fields:
     {{
       "reference": "The Bible verse reference (e.g., Matthew 5:44)",
       "verse": "The full text of the verse",
-      "explanation": "A short explanation (1–2 sentences) of how the verse relates to the original statement"
+      "explanation": "A short explanation (1–2 sentences) that clearly shows how the verse challenges the statement"
     }}
     [/INST]"""
 
