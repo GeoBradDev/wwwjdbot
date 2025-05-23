@@ -17,8 +17,10 @@ image = modal.Image.debian_slim().pip_install(
 model_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
 MODEL_DIR = "/root/.cache/huggingface"
 
+
 class VerseRequest(BaseModel):
     text: str
+
 
 @app.function(
     image=image,
@@ -61,24 +63,27 @@ def match_verse(text: str):
 
     model.eval()
 
-    prompt = f"""<s>[INST] I need to analyze this statement to expose potential hypocrisy from a Christian biblical perspective:
-"{text}"
+    prompt = f"""<s>[INST] 
+    Analyze the following statement from the perspective of Christian teachings:
 
-The goal is to identify how this statement contradicts biblical teachings or values that would be important to Christians.
+    "{text}"
 
-Generate a direct, pointed response that:
-1. Identifies a biblical verse that directly contradicts or challenges this statement
-2. Presents the full text of that verse
-3. Provides a brief, direct explanation showing the hypocrisy or contradiction between the statement and Christian values
+    Determine whether the statement aligns with or contradicts biblical values, especially those emphasized by Jesus in the New Testament.
 
-Return your response as JSON with three fields:
-{{
-  "reference": "The Bible verse reference (e.g., Matthew 5:44)",
-  "verse": "The full text of the verse",
-  "explanation": "A direct explanation (1-2 sentences) showing how the statement contradicts this biblical teaching"
-}}
+    Respond with a concise, respectful comment that:
+    1. Cites a specific Bible verse that applies
+    2. Includes the full text of that verse
+    3. Explains—briefly and clearly—how the verse relates to the statement
 
-Be bold and direct in exposing the contradiction. Focus specifically on statements that claim Christian values but contradict biblical teachings. [/INST]"""
+    The goal is to offer thoughtful moral insight, not judgment. The tone should be direct but compassionate, rooted in scripture and Christian principles of love, justice, and humility.
+
+    Return the result in JSON format with three fields:
+    {{
+      "reference": "The Bible verse reference (e.g., Matthew 5:44)",
+      "verse": "The full text of the verse",
+      "explanation": "A short explanation (1–2 sentences) of how the verse relates to the original statement"
+    }}
+    [/INST]"""
 
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     start_time = time.time()
@@ -151,6 +156,7 @@ Be bold and direct in exposing the contradiction. Focus specifically on statemen
 
     except Exception as e:
         return {"error": f"Parsing failed: {str(e)}", "raw_output": generated_text}
+
 
 @app.function(image=image, gpu="any", timeout=600)
 @modal.fastapi_endpoint(method="POST", docs=True)
