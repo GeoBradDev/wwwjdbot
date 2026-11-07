@@ -104,11 +104,30 @@ def _parse_json_fields(generated_text: str) -> dict | None:
     return None
 
 
+_SIMPLE_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+_ESCAPE = re.compile(
+    r"\\u([dD][89abAB][0-9a-fA-F]{2})\\u([dD][c-fC-F][0-9a-fA-F]{2})"
+    r'|\\(["\\/bfnrt])'
+    r"|\\u([0-9a-fA-F]{4})"
+)
+
+
+def _decode_escape(match: re.Match) -> str:
+    high, low, simple, code = match.groups()
+    if high:
+        return chr(0x10000 + ((int(high, 16) - 0xD800) << 10) + (int(low, 16) - 0xDC00))
+    if simple:
+        return _SIMPLE_ESCAPES[simple]
+    return chr(int(code, 16))
+
+
 def _decode_fallback_value(value: str) -> str:
     try:
         return json.loads('"' + value + '"')
     except json.JSONDecodeError:
-        return value.replace('\\"', '"').replace("\\n", "\n")
+        # One left-to-right pass, so "\\n" is a backslash then "n". Unknown
+        # escapes stay as written; a lone surrogate is rejected later.
+        return _ESCAPE.sub(_decode_escape, value)
 
 
 def _find_fallback_value(generated_text: str, key: str) -> str | None:
