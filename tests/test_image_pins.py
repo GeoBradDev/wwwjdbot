@@ -157,7 +157,7 @@ def test_hf_home_set_on_image():
         for arg in call.args:
             if not isinstance(arg, ast.Dict):
                 continue
-            for key, value in zip(arg.keys, arg.values):
+            for key, value in zip(arg.keys, arg.values, strict=True):
                 if (
                     isinstance(key, ast.Constant)
                     and key.value == "HF_HOME"
