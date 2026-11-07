@@ -27,6 +27,10 @@ Domain skills:
   - In `match_verse`: delete `os.environ["TRANSFORMERS_CACHE"] = MODEL_DIR`, delete `from huggingface_hub import login` and `login(token)`, and pass `token=token` instead of `use_auth_token=token` to both `from_pretrained` calls. The token is still read from `HUGGINGFACE_TOKEN` (the key the existing `huggingface-token` Secret provides).
   - Nothing else in the file changes (prompt, parsing, endpoint, GPU settings are other issues).
 - `tests/test_image_pins.py` (new): static tests (see Proof).
+- Review follow-up (departure from the original plan, raised in review):
+  - `uv_pip_install(..., uv_version="0.10.3")`: without it modal 1.6.3 copies `ghcr.io/astral-sh/uv:latest` into the image, so a forced rebuild would pull an unpinned uv. 0.10.3 is the uv that compiled `requirements.txt`.
+  - In `match_verse`, raise `RuntimeError` right after reading `HUGGINGFACE_TOKEN` when it is empty. With `login()` gone, `token=None` would let huggingface_hub fall back to a stale `HF_HOME/token` file the old `login()` wrote onto the shared Volume. The message never includes a token value. The Volume itself is not touched.
+- `tests/test_review_fixes.py` (new): tests for the two review findings (see Proof).
 - `CLAUDE.md`: already added (git exception). No further change unless Phase 8 finds one.
 
 ## Order of work
@@ -55,6 +59,7 @@ From the worktree root, in a venv at `.venv` (gitignored) created with `uv venv 
 ## Proof
 
 - Criterion 1: `test_requirements_txt_every_line_pinned` (every requirement line is `name[extras]==version`, no URLs or `-e`), `test_requirements_in_pins_core_packages` (the five packages are pinned and transformers is 4.x), `test_image_pins_python_version` (AST: `debian_slim` called with `python_version="3.12"`), `test_image_installs_from_requirements_file` (AST: image built from `requirements.txt`, no string-literal `pip_install(...)` packages).
+- Review follow-up: `test_uv_pip_install_pins_uv_version` (AST: `uv_pip_install` has an exact `uv_version`) and `test_missing_hf_token_fails_loudly` (behavioral: stub `transformers`/`torch` in `sys.modules`, unset `HUGGINGFACE_TOKEN`, call `match_verse.local(...)`, expect `RuntimeError` mentioning `HUGGINGFACE_TOKEN` and no `from_pretrained` call).
 - Criterion 2: `test_no_use_auth_token` and `test_no_transformers_cache` (source text of every `*.py` outside `tests/` and `.venv/`).
 - Criterion 4: `test_dev_requirements_pin_modal`.
 - Criterion 5: `test_hf_home_set_on_image` (AST: `.env({"HF_HOME": MODEL_DIR})` on the image) and MODEL_DIR is `/root/.cache/huggingface`.
