@@ -139,8 +139,8 @@ whitespace; there is no empty success. The rules, from `parse_model_output`:
 - The first JSON object in the output (tried at each `{`, left to right) whose `reference`,
   `verse` and `explanation` are all non-empty strings is used. Other keys are dropped. A
   valid JSON object that has all three keys but does not qualify (empty, non-string or
-  otherwise unacceptable values) is ignored: the fallback below reads only the rest of the
-  output.
+  otherwise unacceptable values) is ignored: it is cut out, the fallback below reads only the rest
+  of the output, and a value that would span the cut is not used.
 - Otherwise, including when the JSON is invalid (for example a trailing comma or an
   unescaped `"` inside a value), a regex fallback reads each `"key": "value"` pair. A value
   ends at the first of these that fits, so inner quotes are kept: a `"` followed by the
