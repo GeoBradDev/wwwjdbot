@@ -4,6 +4,7 @@ model load must not rely on removed transformers arguments."""
 import ast
 import importlib
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -55,11 +56,13 @@ def _calls(tree, attr):
 
 
 def _source_files():
-    for path in ROOT.rglob("*.py"):
-        rel = path.relative_to(ROOT).parts
-        if rel[0] in ("tests", ".venv") or "site-packages" in rel:
-            continue
-        yield path
+    out = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-z", "--", "*.py"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    rels = [r for r in out.split("\0") if r and not r.startswith("tests/")]
+    assert "wwjd_bot_modal.py" in rels, "git ls-files did not list wwjd_bot_modal.py"
+    return [ROOT / r for r in rels]
 
 
 # Criterion 1

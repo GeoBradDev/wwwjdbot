@@ -31,6 +31,7 @@ Domain skills:
   - `uv_pip_install(..., uv_version="0.10.3")`: without it modal 1.6.3 copies `ghcr.io/astral-sh/uv:latest` into the image, so a forced rebuild would pull an unpinned uv. 0.10.3 is the uv that compiled `requirements.txt`.
   - In `match_verse`, raise `RuntimeError` right after reading `HUGGINGFACE_TOKEN` when it is empty. With `login()` gone, `token=None` would let huggingface_hub fall back to a stale `HF_HOME/token` file the old `login()` wrote onto the shared Volume. The message never includes a token value. The Volume itself is not touched.
 - `tests/test_review_fixes.py` (new): tests for the two review findings (see Proof).
+- `tests/test_image_pins.py`: `_source_files()` now lists only git-tracked `.py` files (`git -C ROOT ls-files`, excluding `tests/`), because `ROOT.rglob` picked up nested `.claude/worktrees/*` files in a main checkout and false-failed (one approved unfreeze, see Proof).
 - `CLAUDE.md`: already added (git exception). No further change unless Phase 8 finds one.
 
 ## Order of work
@@ -66,3 +67,11 @@ From the worktree root, in a venv at `.venv` (gitignored) created with `uv venv 
 - Defaults unchanged: `test_default_app_and_volume_names` (import the module with `WWJD_APP_NAME` and `WWJD_HF_CACHE_VOLUME` unset; `app.name == "wwjd-bot"` and `model_volume.name == "huggingface-cache"`; this one is a regression guard and passes before the fix by design). `test_app_and_volume_names_overridable` (with both env vars set, the app and volume take the test names; added during implementation so the env override itself is covered).
 - Local drive (no GPU, no Modal): in a scratch venv with the pinned `transformers`, `torch` (CPU wheel of the same version) and `accelerate`, run the same `AutoTokenizer.from_pretrained(m, token=None)` / `AutoModelForCausalLM.from_pretrained(m, token=None, device_map="auto")` calls on `hf-internal-testing/tiny-random-MistralForCausalLM` and generate a few tokens; also show `use_auth_token=` on transformers 5.22.2 raises `TypeError` (the original defect) while `token=` works there too.
 - Criterion 3 (live): `WWJD_APP_NAME=wwjd-bot-test WWJD_HF_CACHE_VOLUME=wwjd-hf-cache-test MODAL_FORCE_BUILD=1 modal deploy wwjd_bot_modal.py`, POST `{"text": "..."}` to the test endpoint, expect a 200 with `raw.reference` / `raw.verse` / `raw.explanation`, then `modal app stop wwjd-bot-test` and delete the test volume. Requires Modal credentials and the `huggingface-token` Secret in the same workspace.
+- Unfreeze of tests/test_image_pins.py `_source_files()`: user approved via orchestrator, 2026-11-07 (relayed; not seen directly by this run). Reason: run from a main checkout containing `.claude/worktrees/*`, `ROOT.rglob("*.py")` scanned worktree files (including this test file's own strings), so `test_no_use_auth_token` and `test_no_transformers_cache` false-failed. Only `_source_files()` (and `import subprocess`) changed; every check is the same. The helper asserts `wwjd_bot_modal.py` is in the list, so an empty or failed `git ls-files` fails loudly.
+  - Proof A (still catches the defect): scratch worktree at 8d8c0ce with only the rewritten test copied in, `pytest -q -p no:cacheprovider tests/test_image_pins.py -k "use_auth_token or transformers_cache"`:
+    ```
+    E           AssertionError: use_auth_token in wwjd_bot_modal.py
+    E           AssertionError: TRANSFORMERS_CACHE in wwjd_bot_modal.py
+    2 failed, 8 deselected in 0.02s
+    ```
+  - Proof B (false failure gone): untracked `.claude/worktrees/fake/x.py` containing both strings, in the issue worktree. Old test (copy of the previous committed version): `E AssertionError: use_auth_token in x.py`, `E AssertionError: TRANSFORMERS_CACHE in x.py`, `2 failed, 8 deselected`. New test: `2 passed, 8 deselected`. Fake file and temporary copy deleted afterwards.
