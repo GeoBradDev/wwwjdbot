@@ -98,7 +98,7 @@ def _non_empty_strings(values: dict) -> dict | None:
 def _parse_json_fields(generated_text: str) -> tuple[dict | None, str]:
     """Return the first qualifying fields, and the text for the fallback: the
     output with every valid but non-qualifying object that has all three
-    keys replaced by a space."""
+    keys replaced by _CUT."""
     decoder = json.JSONDecoder()
     spans = []
     for match in re.finditer(r"\{", generated_text):
@@ -115,6 +115,12 @@ def _parse_json_fields(generated_text: str) -> tuple[dict | None, str]:
     return None, _remove_spans(generated_text, spans)
 
 
+# Marks where an ignored object was cut out. It is not whitespace, so a
+# "key": right before the cut does not start a value, and a fallback value
+# containing it would span the cut and is not used.
+_CUT = "\x00"
+
+
 def _remove_spans(text: str, spans: list[tuple[int, int]]) -> str:
     merged = []
     for start, end in sorted(spans):
@@ -126,7 +132,7 @@ def _remove_spans(text: str, spans: list[tuple[int, int]]) -> str:
     position = 0
     for start, end in merged:
         parts.append(text[position:start])
-        parts.append(" ")
+        parts.append(_CUT)
         position = end
     parts.append(text[position:])
     return "".join(parts)
@@ -167,7 +173,7 @@ def _find_fallback_value(generated_text: str, key: str) -> str | None:
             if not match.group(1).strip():
                 # An empty value: a later tier would only reach a later quote.
                 break
-            if not _FIELD_KEY.search(match.group(1)):
+            if _CUT not in match.group(1) and not _FIELD_KEY.search(match.group(1)):
                 return match.group(1)
     return None
 
