@@ -15,8 +15,8 @@ app serving `mistralai/Mistral-7B-Instruct-v0.2` on a GPU.
    constant (currently in `lib/request.js`). See the extension repo for the details of how it
    renders results and errors.
 2. **`verse_api`** (in `wwjd_bot_modal.py`). A FastAPI web endpoint
-   (`@modal.fastapi_endpoint(method="POST", docs=True)`). It validates the body and
-   calls `match_verse` remotely.
+   (`@modal.fastapi_endpoint(method="POST", docs=True)`). It validates the body,
+   calls `match_verse` remotely and maps the result to a status code (see API contract).
 3. **`match_verse`** (in `wwjd_bot_modal.py`). A GPU function (T4) that loads the model in
    4-bit from the Hugging Face cache Volume, builds the prompt with `build_prompt(text)`,
    generates, and turns the output into a dict with `parse_model_output(...)`.
@@ -110,19 +110,21 @@ Interactive API docs are at `/docs` on the same host.
 
 ## API contract
 
-This is what the code does today. Issue #3 will revise the error handling, including status
-codes.
-
 Request: `POST` with a JSON body `{"text": "<statement>"}`.
 
 | Case | Status | Body |
 | --- | --- | --- |
 | Success | `200` | `{"raw": {"reference": "...", "verse": "...", "explanation": "..."}}` |
-| `text` is an empty string | `200` | `{"error": "Missing 'text' field in request"}` |
-| `text` key missing, or the body is not valid for `{"text": str}` | `422` | FastAPI validation error |
-| Any exception while calling `match_verse` | `200` | `{"error": "Processing failed: ..."}` |
+| `text` is empty or only whitespace | `422` | `{"error": "The 'text' field must be a non-empty string.", "id": "<id>"}` |
+| `text` key missing, or the body is not valid for `{"text": str}` | `422` | FastAPI's default validation error (`{"detail": [...]}`) |
+| The model output cannot be parsed into three non-empty string fields, even by the fallback | `502` | `{"error": "The model returned a response that could not be parsed.", "id": "<id>"}` |
+| Any exception while calling `match_verse` | `500` | `{"error": "Internal error while processing the request.", "id": "<id>"}` |
 | Request still running after 150 seconds (Modal web endpoint limit, likely on a cold start) | `303` | Redirect to a result URL; each fetch of it waits up to another 150 seconds and returns one of the other responses here, or another `303` if the request is still running |
-| `verse_api` itself runs past its `timeout=600` (possible on a cold start: the wait includes starting the T4 container for `match_verse` and downloading and loading the model) | Modal's timeout error | Modal's own error response, not the `200` `Processing failed` body from this code |
+| `verse_api` itself runs past its `timeout=600` (possible on a cold start: the wait includes starting the T4 container for `match_verse` and downloading and loading the model) | Modal's timeout error | Modal's own error response, not a body from this code |
+
+The error messages are fixed strings and never contain exception text or model output.
+`id` is a random 32 character hex correlation id; the same id is printed in the Modal logs
+for `500` and `502` responses.
 
 The `303` comes from Modal, not from this code: every Modal web endpoint has a 150 second
 HTTP request limit, and a longer request is redirected to a result URL that can be reloaded
@@ -131,20 +133,17 @@ without starting a new request and blocks until the request completes (see
 produce a chain of `303`s, so clients must follow redirects repeatedly to get the result;
 `curl -L` does.
 
-On success the three `raw` fields are normally strings, possibly empty (for example when the
-model output could not be split into fields). On the JSON path, though, they carry whatever
-JSON values the model emitted, with no type coercion today: model output
-`{"reference": 5, "verse": null, "explanation": ["x"]}` yields
-`{"raw": {"reference": 5, "verse": null, "explanation": ["x"]}}`. The rules, from
-`parse_model_output`:
+On success all three `raw` fields are non-empty strings, stripped of surrounding
+whitespace; there is no empty success. The rules, from `parse_model_output`:
 
-- If the output contains a `{...}` block (first `{` to last `}`) that parses as JSON and has
-  `reference`, `verse` and `explanation`, those three values are used.
-- Otherwise the fields are pulled out of the text with regexes; missing ones are empty.
-- If none are found, `reference` and `verse` are empty and `explanation` is the whole output.
-- If the `{...}` block is not valid JSON, `match_verse` returns
-  `{"error": "Parsing failed: ...", "raw_output": ...}`, and `verse_api` then responds `200`
-  with all three `raw` fields empty.
+- The first JSON object in the output (tried at each `{`, left to right) whose `reference`,
+  `verse` and `explanation` are all non-empty strings is used. Other keys are dropped.
+- Otherwise, including when the JSON is invalid (for example a trailing comma or an
+  unescaped `"` inside a value), a regex fallback reads each `"key": "value"` pair. A value
+  ends at a `"` followed by the next `"key":`, a `}` or the end of the output, so inner
+  quotes are kept, and escapes such as `\"` and `\n` are decoded.
+- If the fallback does not find all three as non-empty strings, `match_verse` returns
+  `{"error": "parse_failed", "raw_output": ...}` and `verse_api` responds `502`.
 
 ## Development
 
