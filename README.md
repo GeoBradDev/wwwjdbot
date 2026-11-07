@@ -137,9 +137,10 @@ On success all three `raw` fields are non-empty strings, stripped of surrounding
 whitespace; there is no empty success. The rules, from `parse_model_output`:
 
 - The first JSON object in the output (tried at each `{`, left to right) whose `reference`,
-  `verse` and `explanation` are all non-empty strings is used. Other keys are dropped. If
-  no object qualifies but a valid JSON object has all three keys (with empty, non-string or
-  otherwise unacceptable values), the response is a `502` and the fallback below is not run.
+  `verse` and `explanation` are all non-empty strings is used. Other keys are dropped. A
+  valid JSON object that has all three keys but does not qualify (empty, non-string or
+  otherwise unacceptable values) is ignored: the fallback below reads only the rest of the
+  output.
 - Otherwise, including when the JSON is invalid (for example a trailing comma or an
   unescaped `"` inside a value), a regex fallback reads each `"key": "value"` pair. A value
   ends at the first of these that fits, so inner quotes are kept: a `"` followed by the
