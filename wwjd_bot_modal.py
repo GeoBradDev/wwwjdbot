@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 
 import modal
@@ -180,22 +181,40 @@ def match_verse(text: str):
     return parse_model_output(generated_text, model_name, elapsed_time)
 
 
+ERROR_EMPTY_TEXT = "The 'text' field must be a non-empty string."
+ERROR_UNPARSEABLE = "The model returned a response that could not be parsed."
+ERROR_INTERNAL = "Internal error while processing the request."
+
+
+def handle_verse_request(text, match) -> tuple[int, dict]:
+    request_id = uuid.uuid4().hex
+
+    if not isinstance(text, str) or not text.strip():
+        return 422, {"error": ERROR_EMPTY_TEXT, "id": request_id}
+
+    try:
+        result = match(text)
+    except Exception as e:  # noqa: BLE001 any failure becomes a generic 500
+        print(f"[{request_id}] match_verse failed: {type(e).__name__}: {e}")
+        return 500, {"error": ERROR_INTERNAL, "id": request_id}
+
+    if not isinstance(result, dict):
+        reason = f"result is {type(result).__name__}, not dict"
+    elif "error" in result:
+        reason = f"match_verse returned error {result['error']!r}"
+    else:
+        fields = _non_empty_strings(result)
+        if fields:
+            return 200, {"raw": fields}
+        reason = "a field is missing, empty or not a string"
+    print(f"[{request_id}] unparseable model output: {reason}")
+    return 502, {"error": ERROR_UNPARSEABLE, "id": request_id}
+
+
 @app.function(image=image, gpu="any", timeout=600)
 @modal.fastapi_endpoint(method="POST", docs=True)
 async def verse_api(body: VerseRequest):
-    text = body.text
+    from fastapi.responses import JSONResponse
 
-    if not text:
-        return {"error": "Missing 'text' field in request"}
-
-    try:
-        result = match_verse.remote(text)
-        return {
-            "raw": {
-                "reference": result.get("reference", ""),
-                "verse": result.get("verse", ""),
-                "explanation": result.get("explanation", "")
-            }
-        }
-    except Exception as e:  # noqa: BLE001 issue #3 reworks this handler
-        return {"error": f"Processing failed: {str(e)}"}
+    status, payload = handle_verse_request(body.text, match_verse.remote)
+    return JSONResponse(status_code=status, content=payload)
