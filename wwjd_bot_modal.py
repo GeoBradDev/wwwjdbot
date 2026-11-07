@@ -13,7 +13,7 @@ REQUIREMENTS = Path(__file__).parent / "requirements.txt"
 # Create image with pinned dependencies from the compiled lock file
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .uv_pip_install(requirements=[str(REQUIREMENTS)])
+    .uv_pip_install(requirements=[str(REQUIREMENTS)], uv_version="0.10.3")
     .env({"HF_HOME": MODEL_DIR})
 )
 
@@ -44,6 +44,8 @@ def match_verse(text: str):
 
     model_name = "mistralai/Mistral-7B-Instruct-v0.2"
     token = os.environ.get("HUGGINGFACE_TOKEN")
+    if not token:
+        raise RuntimeError("HUGGINGFACE_TOKEN is not set; attach the huggingface-token Modal Secret")
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
