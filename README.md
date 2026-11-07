@@ -143,13 +143,16 @@ whitespace; there is no empty success. The rules, from `parse_model_output`:
   ends at the first of these that fits, so inner quotes are kept: a `"` followed by the
   next quoted `"key":` (with or without a comma) or a `}`; otherwise a `"` before a line
   end; otherwise a `"` at the end of the output (each optionally after a trailing comma).
-  A value that is empty or contains another field's `"key":` is skipped in favor of the
-  next occurrence of the key. JSON string escapes are decoded; a lone surrogate escape
-  such as `\ud800` makes the field unacceptable (`502`). Known limit: brace-less output
-  with prose on the same line after the last value is a `502`
-  (`"explanation": "C" I hope this helps`), but if that prose ends in a quote
-  (`"explanation": "C" as Jesus said "love"`) the value runs to that quote and the
-  response is a `200` with the wrong explanation.
+  When the value a terminator gives is empty, whitespace or contains another field's `"key":`, the
+  next terminator in that order is tried, then the next occurrence of the key. JSON string
+  escapes are decoded; a lone surrogate escape such as `\ud800` makes the field
+  unacceptable (`502`). Known limits: a later quote in the output can end the last value,
+  giving a `200` with the wrong text. This happens when same-line prose
+  after the value ends in a quote (`"explanation": "C" as Jesus said "love"`), when
+  same-line prose is followed by a later line ending in a quote, and when the value is
+  empty or whitespace (`"explanation": ""` followed by a later quote at a line end or at
+  the end of the output, even if the JSON is otherwise valid). Without such a quote, same-line prose gives a `502`
+  (`"explanation": "C" I hope this helps`).
 - If the fallback does not find all three as non-empty strings, `match_verse` returns
   `{"error": "parse_failed", "raw_output": ...}` and `verse_api` responds `502`.
 
