@@ -7,10 +7,13 @@ app serving `mistralai/Mistral-7B-Instruct-v0.2` on a GPU.
 ## Architecture
 
 1. **Chrome extension** ([GeoBradDev/WWJC_ChromeExtension](https://github.com/GeoBradDev/WWJC_ChromeExtension)).
-   All the backend relies on: the extension sends `POST` with `{"text": "<selection>"}` to the
-   production URL and reads `raw.reference`, `raw.verse` and `raw.explanation` from the
-   response. The URL is its `API_URL` constant (currently in `lib/request.js`). How it renders
-   results and errors is up to the extension; see its repo.
+   What the backend relies on, as the extension currently behaves: it sends `POST` with
+   `{"text": "<selection>"}` to the production URL and reads `raw.reference`, `raw.verse` and
+   `raw.explanation` from the response. It treats any non-2xx status as a failure, shows the
+   text of an `error` key when the body has one, and expects each `raw` field to be a
+   non-empty string (anything else counts as an incomplete response). The URL is its `API_URL`
+   constant (currently in `lib/request.js`). See the extension repo for the details of how it
+   renders results and errors.
 2. **`verse_api`** (in `wwjd_bot_modal.py`). A FastAPI web endpoint
    (`@modal.fastapi_endpoint(method="POST", docs=True)`). It validates the body and
    calls `match_verse` remotely.
@@ -118,13 +121,15 @@ Request: `POST` with a JSON body `{"text": "<statement>"}`.
 | `text` is an empty string | `200` | `{"error": "Missing 'text' field in request"}` |
 | `text` key missing, or the body is not valid for `{"text": str}` | `422` | FastAPI validation error |
 | Any exception while calling `match_verse` | `200` | `{"error": "Processing failed: ..."}` |
-| Request still running after 150 seconds (Modal web endpoint limit, likely on a cold start) | `303` | Redirect to a result URL; fetching it waits for and returns one of the responses above |
+| Request still running after 150 seconds (Modal web endpoint limit, likely on a cold start) | `303` | Redirect to a result URL; each fetch of it waits up to another 150 seconds and returns one of the other responses here, or another `303` if the request is still running |
+| `verse_api` itself runs past its `timeout=600` (possible on a cold start: the wait includes starting the T4 container for `match_verse` and downloading and loading the model) | Modal's timeout error | Modal's own error response, not the `200` `Processing failed` body from this code |
 
 The `303` comes from Modal, not from this code: every Modal web endpoint has a 150 second
 HTTP request limit, and a longer request is redirected to a result URL that can be reloaded
-without starting a new request (see
-[Modal request timeouts](https://modal.com/docs/guide/webhook-timeouts)). Clients must
-follow the redirect to get the result.
+without starting a new request and blocks until the request completes (see
+[Modal request timeouts](https://modal.com/docs/guide/webhook-timeouts)). A slow request can
+produce a chain of `303`s, so clients must follow redirects repeatedly to get the result;
+`curl -L` does.
 
 On success the three `raw` fields are normally strings, possibly empty (for example when the
 model output could not be split into fields). On the JSON path, though, they carry whatever
