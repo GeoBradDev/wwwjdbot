@@ -140,13 +140,16 @@ whitespace; there is no empty success. The rules, from `parse_model_output`:
   `verse` and `explanation` are all non-empty strings is used. Other keys are dropped.
 - Otherwise, including when the JSON is invalid (for example a trailing comma or an
   unescaped `"` inside a value), a regex fallback reads each `"key": "value"` pair. A value
-  ends at a `"` followed by the next quoted `"key":` (with or without a comma), a `}`, or
-  the end of the output, optionally after a trailing comma, so inner quotes are kept; only
-  if none of those fits does a `"` before a line end count. A value containing another
-  field's `"key":` is skipped in favor of the next occurrence of the key. JSON string
-  escapes are decoded. Brace-less output with prose on the same line after the last value
-  (`"explanation": "C" I hope this helps`) is a `502`, as is a field holding a lone
-  surrogate escape such as `\ud800`.
+  ends at the first of these that fits, so inner quotes are kept: a `"` followed by the
+  next quoted `"key":` (with or without a comma) or a `}`; otherwise a `"` before a line
+  end; otherwise a `"` at the end of the output (each optionally after a trailing comma).
+  A value that is empty or contains another field's `"key":` is skipped in favor of the
+  next occurrence of the key. JSON string escapes are decoded; a lone surrogate escape
+  such as `\ud800` makes the field unacceptable (`502`). Known limit: brace-less output
+  with prose on the same line after the last value is a `502`
+  (`"explanation": "C" I hope this helps`), but if that prose ends in a quote
+  (`"explanation": "C" as Jesus said "love"`) the value runs to that quote and the
+  response is a `200` with the wrong explanation.
 - If the fallback does not find all three as non-empty strings, `match_verse` returns
   `{"error": "parse_failed", "raw_output": ...}` and `verse_api` responds `502`.
 
