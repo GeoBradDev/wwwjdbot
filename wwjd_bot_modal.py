@@ -1,13 +1,16 @@
+import json
 import os
+import re
+import time
 from pathlib import Path
 
 import modal
 from pydantic import BaseModel
-import time
 
 app = modal.App(os.environ.get("WWJD_APP_NAME", "wwjd-bot"))
 
 MODEL_DIR = "/root/.cache/huggingface"
+MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.2"
 REQUIREMENTS = Path(__file__).parent / "requirements.txt"
 
 # Create image with pinned dependencies from the compiled lock file
@@ -28,47 +31,8 @@ class VerseRequest(BaseModel):
     text: str
 
 
-@app.function(
-    image=image,
-    volumes={MODEL_DIR: model_volume},
-    timeout=600,
-    gpu="T4",
-    secrets=[modal.Secret.from_name("huggingface-token")]
-)
-def match_verse(text: str):
-    from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-    import torch
-    import os
-    import re
-    import json
-
-    model_name = "mistralai/Mistral-7B-Instruct-v0.2"
-    token = os.environ.get("HUGGINGFACE_TOKEN")
-    if not token:
-        raise RuntimeError("HUGGINGFACE_TOKEN is not set; attach the huggingface-token Modal Secret")
-
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.float16,
-        bnb_4bit_quant_type="nf4",
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        token=token
-    )
-    tokenizer.pad_token = tokenizer.eos_token
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        token=token,
-        quantization_config=bnb_config,
-        device_map="auto",
-    )
-
-    model.eval()
-
-    prompt = f"""<s>[INST]
+def build_prompt(text: str) -> str:
+    return f"""<s>[INST]
     Evaluate the following statement from a Christian biblical perspective:
 
     "{text}"
@@ -90,30 +54,8 @@ def match_verse(text: str):
     }}
     [/INST]"""
 
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    start_time = time.time()
 
-    with torch.no_grad():
-        output = model.generate(
-            **inputs,
-            max_new_tokens=500,
-            temperature=0.2,
-            top_p=0.95,
-            do_sample=True,
-            repetition_penalty=1.2,
-            min_length=inputs.input_ids.shape[1] + 20,
-            pad_token_id=tokenizer.eos_token_id
-        )
-
-    generated_text = tokenizer.decode(output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
-    elapsed_time = time.time() - start_time
-
-    print("=== Prompt Sent ===")
-    print(prompt)
-    print("=== Model Output ===")
-    print(generated_text)
-    print(f"Response generated in {elapsed_time:.2f} seconds")
-
+def parse_model_output(generated_text: str, model_name: str, elapsed_time: float) -> dict:
     json_match = re.search(r'({[\s\S]*})', generated_text)
 
     try:
@@ -159,8 +101,74 @@ def match_verse(text: str):
             "generation_time": f"{elapsed_time:.2f} seconds"
         }
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 issue #3 reworks this handler
         return {"error": f"Parsing failed: {str(e)}", "raw_output": generated_text}
+
+
+@app.function(
+    image=image,
+    volumes={MODEL_DIR: model_volume},
+    timeout=600,
+    gpu="T4",
+    secrets=[modal.Secret.from_name("huggingface-token")]
+)
+def match_verse(text: str):
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+    model_name = MODEL_NAME
+    token = os.environ.get("HUGGINGFACE_TOKEN")
+    if not token:
+        raise RuntimeError("HUGGINGFACE_TOKEN is not set; attach the huggingface-token Modal Secret")
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_quant_type="nf4",
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        token=token
+    )
+    tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        token=token,
+        quantization_config=bnb_config,
+        device_map="auto",
+    )
+
+    model.eval()
+
+    prompt = build_prompt(text)
+
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    start_time = time.time()
+
+    with torch.no_grad():
+        output = model.generate(
+            **inputs,
+            max_new_tokens=500,
+            temperature=0.2,
+            top_p=0.95,
+            do_sample=True,
+            repetition_penalty=1.2,
+            min_length=inputs.input_ids.shape[1] + 20,
+            pad_token_id=tokenizer.eos_token_id
+        )
+
+    generated_text = tokenizer.decode(output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
+    elapsed_time = time.time() - start_time
+
+    print("=== Prompt Sent ===")
+    print(prompt)
+    print("=== Model Output ===")
+    print(generated_text)
+    print(f"Response generated in {elapsed_time:.2f} seconds")
+
+    return parse_model_output(generated_text, model_name, elapsed_time)
 
 
 @app.function(image=image, gpu="any", timeout=600)
@@ -180,5 +188,5 @@ async def verse_api(body: VerseRequest):
                 "explanation": result.get("explanation", "")
             }
         }
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 issue #3 reworks this handler
         return {"error": f"Processing failed: {str(e)}"}
