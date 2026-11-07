@@ -95,22 +95,41 @@ def _non_empty_strings(values: dict) -> dict | None:
     return fields
 
 
-def _parse_json_fields(generated_text: str) -> tuple[dict | None, bool]:
-    """Return the first qualifying fields, and whether any valid JSON object
-    had all three keys (so the model did answer in JSON)."""
+def _parse_json_fields(generated_text: str) -> tuple[dict | None, str]:
+    """Return the first qualifying fields, and the text for the fallback: the
+    output with every valid but non-qualifying object that has all three
+    keys replaced by a space."""
     decoder = json.JSONDecoder()
-    saw_all_keys = False
+    spans = []
     for match in re.finditer(r"\{", generated_text):
         try:
-            value, _ = decoder.raw_decode(generated_text, match.start())
+            value, end = decoder.raw_decode(generated_text, match.start())
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict):
             fields = _non_empty_strings(value)
             if fields:
-                return fields, True
-            saw_all_keys = saw_all_keys or all(key in value for key in FIELDS)
-    return None, saw_all_keys
+                return fields, generated_text
+            if all(key in value for key in FIELDS):
+                spans.append((match.start(), end))
+    return None, _remove_spans(generated_text, spans)
+
+
+def _remove_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    parts = []
+    position = 0
+    for start, end in merged:
+        parts.append(text[position:start])
+        parts.append(" ")
+        position = end
+    parts.append(text[position:])
+    return "".join(parts)
 
 
 _SIMPLE_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
@@ -163,9 +182,9 @@ def _parse_regex_fields(generated_text: str) -> dict | None:
 
 
 def parse_model_output(generated_text: str, model_name: str, elapsed_time: float) -> dict:
-    fields, saw_json_answer = _parse_json_fields(generated_text)
-    if not fields and not saw_json_answer:
-        fields = _parse_regex_fields(generated_text)
+    fields, fallback_text = _parse_json_fields(generated_text)
+    if not fields:
+        fields = _parse_regex_fields(fallback_text)
     if not fields:
         return {"error": "parse_failed", "raw_output": generated_text}
     return {
