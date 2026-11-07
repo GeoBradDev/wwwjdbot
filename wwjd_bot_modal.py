@@ -55,54 +55,63 @@ def build_prompt(text: str) -> str:
     [/INST]"""
 
 
-def parse_model_output(generated_text: str, model_name: str, elapsed_time: float) -> dict:
-    json_match = re.search(r'({[\s\S]*})', generated_text)
+FIELDS = ("reference", "verse", "explanation")
 
+# A fallback value ends at a quote followed by the next "key":, a closing
+# brace, or the end of the text (each optionally after a trailing comma).
+_VALUE_END = r'(?="\s*(?:,\s*"[A-Za-z_]+"\s*:|,?\s*\}|,?\s*\Z))'
+
+
+def _non_empty_strings(values: dict) -> dict | None:
+    fields = {}
+    for key in FIELDS:
+        value = values.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        fields[key] = value.strip()
+    return fields
+
+
+def _parse_json_fields(generated_text: str) -> dict | None:
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", generated_text):
+        try:
+            value, _ = decoder.raw_decode(generated_text, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            fields = _non_empty_strings(value)
+            if fields:
+                return fields
+    return None
+
+
+def _decode_fallback_value(value: str) -> str:
     try:
-        if json_match:
-            json_str = json_match.group(1)
-            response_json = json.loads(json_str)
+        return json.loads('"' + value + '"')
+    except json.JSONDecodeError:
+        return value.replace('\\"', '"').replace("\\n", "\n")
 
-            if all(k in response_json for k in ['reference', 'verse', 'explanation']):
-                return {
-                    "reference": response_json["reference"],
-                    "verse": response_json["verse"],
-                    "explanation": response_json["explanation"],
-                    "model": model_name,
-                    "generation_time": f"{elapsed_time:.2f} seconds"
-                }
 
-        reference_pattern = re.compile(r'"reference"\s*:\s*"([^"]+)"')
-        verse_pattern = re.compile(r'"verse"\s*:\s*"([^"]+)"')
-        explanation_pattern = re.compile(r'"explanation"\s*:\s*"([^"]+)"')
+def _parse_regex_fields(generated_text: str) -> dict | None:
+    values = {}
+    for key in FIELDS:
+        pattern = rf'"{key}"\s*:\s*"(.*?)' + _VALUE_END
+        match = re.search(pattern, generated_text, re.DOTALL)
+        if match:
+            values[key] = _decode_fallback_value(match.group(1))
+    return _non_empty_strings(values)
 
-        reference_match = reference_pattern.search(generated_text)
-        verse_match = verse_pattern.search(generated_text)
-        explanation_match = explanation_pattern.search(generated_text)
 
-        reference = reference_match.group(1) if reference_match else ""
-        verse = verse_match.group(1) if verse_match else ""
-        explanation = explanation_match.group(1) if explanation_match else ""
-
-        if reference or verse or explanation:
-            return {
-                "reference": reference,
-                "verse": verse,
-                "explanation": explanation,
-                "model": model_name,
-                "generation_time": f"{elapsed_time:.2f} seconds"
-            }
-
-        return {
-            "reference": "",
-            "verse": "",
-            "explanation": generated_text,
-            "model": model_name,
-            "generation_time": f"{elapsed_time:.2f} seconds"
-        }
-
-    except Exception as e:  # noqa: BLE001 issue #3 reworks this handler
-        return {"error": f"Parsing failed: {str(e)}", "raw_output": generated_text}
+def parse_model_output(generated_text: str, model_name: str, elapsed_time: float) -> dict:
+    fields = _parse_json_fields(generated_text) or _parse_regex_fields(generated_text)
+    if not fields:
+        return {"error": "parse_failed", "raw_output": generated_text}
+    return {
+        **fields,
+        "model": model_name,
+        "generation_time": f"{elapsed_time:.2f} seconds",
+    }
 
 
 @app.function(
