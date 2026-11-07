@@ -112,8 +112,12 @@ Request: `POST` with a JSON body `{"text": "<statement>"}`.
 | `text` key missing, or the body is not valid for `{"text": str}` | `422` | FastAPI validation error |
 | Any exception while calling `match_verse` | `200` | `{"error": "Processing failed: ..."}` |
 
-On success the three `raw` fields are always strings but may be empty, for example when the
-model output could not be split into fields. The rules, from `parse_model_output`:
+On success the three `raw` fields are normally strings, possibly empty (for example when the
+model output could not be split into fields). On the JSON path, though, they carry whatever
+JSON values the model emitted, with no type coercion today: model output
+`{"reference": 5, "verse": null, "explanation": ["x"]}` yields
+`{"raw": {"reference": 5, "verse": null, "explanation": ["x"]}}`. The rules, from
+`parse_model_output`:
 
 - If the output contains a `{...}` block (first `{` to last `}`) that parses as JSON and has
   `reference`, `verse` and `explanation`, those three values are used.
@@ -143,7 +147,8 @@ CI (`.github/workflows/ci.yml`) runs the same three checks on every push and pul
 
 - `requirements.in`: top-level dependencies of the Modal image.
 - `requirements.txt`: the compiled, fully pinned lock that the image installs. Do not edit it
-  by hand. Regenerate it after changing `requirements.in` with:
+  by hand. Regenerate it after changing `requirements.in` with the command below. This step
+  alone needs [`uv`](https://docs.astral.sh/uv/) installed; nothing else in this README does.
 
   ```sh
   uv pip compile requirements.in -o requirements.txt --python-version 3.12 --python-platform x86_64-manylinux_2_28
