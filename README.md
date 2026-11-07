@@ -140,8 +140,11 @@ whitespace; there is no empty success. The rules, from `parse_model_output`:
   `verse` and `explanation` are all non-empty strings is used. Other keys are dropped.
 - Otherwise, including when the JSON is invalid (for example a trailing comma or an
   unescaped `"` inside a value), a regex fallback reads each `"key": "value"` pair. A value
-  ends at a `"` followed by the next `"key":`, a `}` or the end of the output, so inner
-  quotes are kept, and escapes such as `\"` and `\n` are decoded.
+  ends at a `"` followed by the next quoted `"key":` (with or without a comma), a `}`, a
+  line end, or the end of the output, optionally after a trailing comma, so inner quotes
+  are kept. A value containing another field's `"key":` is skipped in favor of the next
+  occurrence of the key. JSON string escapes are decoded. Prose on the same line after the
+  last value is not parsed.
 - If the fallback does not find all three as non-empty strings, `match_verse` returns
   `{"error": "parse_failed", "raw_output": ...}` and `verse_api` responds `502`.
 
