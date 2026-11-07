@@ -7,9 +7,10 @@ app serving `mistralai/Mistral-7B-Instruct-v0.2` on a GPU.
 ## Architecture
 
 1. **Chrome extension** ([GeoBradDev/WWJC_ChromeExtension](https://github.com/GeoBradDev/WWJC_ChromeExtension)).
-   The user selects text and picks the context menu entry. `background.js` sends
-   `POST https://brad-stricherz--wwjd-bot-verse-api.modal.run` with `{"text": "<selection>"}`,
-   and `popup.js` shows `raw.reference`, `raw.verse` and `raw.explanation` from the response.
+   All the backend relies on: the extension sends `POST` with `{"text": "<selection>"}` to the
+   production URL and reads `raw.reference`, `raw.verse` and `raw.explanation` from the
+   response. The URL is its `API_URL` constant (currently in `lib/request.js`). How it renders
+   results and errors is up to the extension; see its repo.
 2. **`verse_api`** (in `wwjd_bot_modal.py`). A FastAPI web endpoint
    (`@modal.fastapi_endpoint(method="POST", docs=True)`). It validates the body and
    calls `match_verse` remotely.
@@ -68,10 +69,12 @@ modal deploy wwjd_bot_modal.py
 
 The production URL follows the pattern `https://<workspace>--wwjd-bot-verse-api.modal.run`.
 The extension calls `https://brad-stricherz--wwjd-bot-verse-api.modal.run`, so a deploy to a
-different workspace or app name needs the extension's `background.js` updated to match.
+different workspace or app name needs the extension's `API_URL` constant (currently in
+`lib/request.js`) updated to match.
 
-The first request after a deploy downloads the model into the Volume and is slow; later
-requests read it from the cache.
+The first request after a deploy downloads the model into the Volume and loads it in 4-bit
+on a T4, which can take longer than Modal's 150 second web request limit (see the API
+contract below); later requests read the weights from the cache.
 
 ### Test deploy alongside production
 
@@ -91,10 +94,14 @@ same `huggingface-token` Secret.
 ### Try it
 
 ```sh
-curl -X POST https://<workspace>--wwjd-bot-verse-api.modal.run \
-  -H 'Content-Type: application/json' \
-  -d '{"text": "Charity only encourages laziness."}'
+curl -L -H 'Content-Type: application/json' \
+  -d '{"text": "Charity only encourages laziness."}' \
+  https://<workspace>--wwjd-bot-verse-api.modal.run
 ```
+
+`-d` makes the first request a `POST`. `-L` follows the `303` that Modal returns when a
+request runs past 150 seconds; leave out `-X POST` so curl fetches the result URL with `GET`
+as the redirect intends.
 
 Interactive API docs are at `/docs` on the same host.
 
@@ -111,6 +118,13 @@ Request: `POST` with a JSON body `{"text": "<statement>"}`.
 | `text` is an empty string | `200` | `{"error": "Missing 'text' field in request"}` |
 | `text` key missing, or the body is not valid for `{"text": str}` | `422` | FastAPI validation error |
 | Any exception while calling `match_verse` | `200` | `{"error": "Processing failed: ..."}` |
+| Request still running after 150 seconds (Modal web endpoint limit, likely on a cold start) | `303` | Redirect to a result URL; fetching it waits for and returns one of the responses above |
+
+The `303` comes from Modal, not from this code: every Modal web endpoint has a 150 second
+HTTP request limit, and a longer request is redirected to a result URL that can be reloaded
+without starting a new request (see
+[Modal request timeouts](https://modal.com/docs/guide/webhook-timeouts)). Clients must
+follow the redirect to get the result.
 
 On success the three `raw` fields are normally strings, possibly empty (for example when the
 model output could not be split into fields). On the JSON path, though, they carry whatever
@@ -126,9 +140,6 @@ JSON values the model emitted, with no type coercion today: model output
 - If the `{...}` block is not valid JSON, `match_verse` returns
   `{"error": "Parsing failed: ...", "raw_output": ...}`, and `verse_api` then responds `200`
   with all three `raw` fields empty.
-
-The extension treats a response without `raw.reference` as "no comment received", which
-covers the error bodies and the empty-field cases above.
 
 ## Development
 
