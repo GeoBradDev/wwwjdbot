@@ -58,9 +58,13 @@ def build_prompt(text: str) -> str:
 
 FIELDS = ("reference", "verse", "explanation")
 
-# A fallback value ends at a quote followed by the next "key":, a closing
-# brace, or the end of the text (each optionally after a trailing comma).
-_VALUE_END = r'(?="\s*(?:,\s*"[A-Za-z_]+"\s*:|,?\s*\}|,?\s*\Z))'
+# A fallback value ends at a quote followed by the next quoted "key": (with
+# or without a comma), a closing brace, or the end of the text (each
+# optionally after a trailing comma).
+_VALUE_END = r'(?="\s*(?:,?\s*"[A-Za-z_][A-Za-z0-9_-]*"\s*:|,?\s*\}|,?\s*\Z))'
+_VALUE = re.compile(r"(.*?)" + _VALUE_END, re.DOTALL)
+# A captured value that contains another field's key ran past its own end.
+_FIELD_KEY = re.compile(r'"(?:reference|verse|explanation)"\s*:')
 
 
 def _non_empty_strings(values: dict) -> dict | None:
@@ -94,13 +98,20 @@ def _decode_fallback_value(value: str) -> str:
         return value.replace('\\"', '"').replace("\\n", "\n")
 
 
+def _find_fallback_value(generated_text: str, key: str) -> str | None:
+    for start in re.finditer(rf'"{key}"\s*:\s*"', generated_text):
+        match = _VALUE.match(generated_text, start.end())
+        if match and not _FIELD_KEY.search(match.group(1)):
+            return match.group(1)
+    return None
+
+
 def _parse_regex_fields(generated_text: str) -> dict | None:
     values = {}
     for key in FIELDS:
-        pattern = rf'"{key}"\s*:\s*"(.*?)' + _VALUE_END
-        match = re.search(pattern, generated_text, re.DOTALL)
-        if match:
-            values[key] = _decode_fallback_value(match.group(1))
+        value = _find_fallback_value(generated_text, key)
+        if value is not None:
+            values[key] = _decode_fallback_value(value)
     return _non_empty_strings(values)
 
 
