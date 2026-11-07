@@ -27,7 +27,7 @@ Domain skills:
   - `match_verse` keeps the local `transformers` and `torch` imports (sorted), drops the now-unused local `os`, `re`, `json` imports, and calls `build_prompt(text)` and `return parse_model_output(generated_text, model_name, elapsed_time)`. The prints, timing and generation call stay as they are.
   - `verse_api`: only add `# noqa: BLE001 <reason>` to its `except Exception`. No other change.
   - The helpers live in this file, not a new module, because Modal 1.x only ships the entrypoint file to the container automatically; a separate module would need `add_local_python_source` and an unverifiable deploy.
-- `tests/test_prompt_and_parsing.py` (new): characterization tests (see Proof). Non-ASCII prompt characters are written as `—` / `–` escapes so the test file has no em dash.
+- `tests/test_prompt_and_parsing.py` (new): characterization tests (see Proof). Non-ASCII prompt characters are written as `\u2014` / `\u2013` escapes so the test file has no em dash.
 - `tests/test_image_pins.py`: `zip(arg.keys, arg.values, strict=True)` (ruff B905; `ast.Dict` keys and values are always the same length, so behavior is unchanged).
 - `pyproject.toml` (new): tool config only, no packaging. `[tool.ruff]` `target-version = "py312"`, `extend-exclude = [".venv", ".claude"]`; `[tool.ruff.lint]` `select = ["E", "F", "W", "I", "B", "BLE", "UP"]`, `ignore = ["E501"]` with a comment that the prompt is one long string literal whose lines cannot be wrapped without changing model input. `[tool.pytest.ini_options]` `testpaths = ["tests"]`.
 - `requirements-dev.txt`: add `ruff==0.17.4`.
