@@ -95,8 +95,11 @@ def _non_empty_strings(values: dict) -> dict | None:
     return fields
 
 
-def _parse_json_fields(generated_text: str) -> dict | None:
+def _parse_json_fields(generated_text: str) -> tuple[dict | None, bool]:
+    """Return the first qualifying fields, and whether any valid JSON object
+    had all three keys (so the model did answer in JSON)."""
     decoder = json.JSONDecoder()
+    saw_all_keys = False
     for match in re.finditer(r"\{", generated_text):
         try:
             value, _ = decoder.raw_decode(generated_text, match.start())
@@ -105,8 +108,9 @@ def _parse_json_fields(generated_text: str) -> dict | None:
         if isinstance(value, dict):
             fields = _non_empty_strings(value)
             if fields:
-                return fields
-    return None
+                return fields, True
+            saw_all_keys = saw_all_keys or all(key in value for key in FIELDS)
+    return None, saw_all_keys
 
 
 _SIMPLE_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
@@ -139,7 +143,12 @@ def _find_fallback_value(generated_text: str, key: str) -> str | None:
     for start in re.finditer(rf'"{key}"\s*:\s*"', generated_text):
         for value_re in _VALUE_TIERS:
             match = value_re.match(generated_text, start.end())
-            if match and match.group(1).strip() and not _FIELD_KEY.search(match.group(1)):
+            if not match:
+                continue
+            if not match.group(1).strip():
+                # An empty value: a later tier would only reach a later quote.
+                break
+            if not _FIELD_KEY.search(match.group(1)):
                 return match.group(1)
     return None
 
@@ -154,7 +163,9 @@ def _parse_regex_fields(generated_text: str) -> dict | None:
 
 
 def parse_model_output(generated_text: str, model_name: str, elapsed_time: float) -> dict:
-    fields = _parse_json_fields(generated_text) or _parse_regex_fields(generated_text)
+    fields, saw_json_answer = _parse_json_fields(generated_text)
+    if not fields and not saw_json_answer:
+        fields = _parse_regex_fields(generated_text)
     if not fields:
         return {"error": "parse_failed", "raw_output": generated_text}
     return {
