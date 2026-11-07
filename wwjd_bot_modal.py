@@ -70,11 +70,21 @@ _VALUE = re.compile(r"(.*?)" + _VALUE_END, re.DOTALL)
 _FIELD_KEY = re.compile(r'"(?:reference|verse|explanation)"\s*:')
 
 
+def _encodable(value: str) -> bool:
+    # A lone surrogate (for example from \ud800) makes Starlette's JSONResponse
+    # raise UnicodeEncodeError outside the handler.
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _non_empty_strings(values: dict) -> dict | None:
     fields = {}
     for key in FIELDS:
         value = values.get(key)
-        if not isinstance(value, str) or not value.strip():
+        if not isinstance(value, str) or not value.strip() or not _encodable(value):
             return None
         fields[key] = value.strip()
     return fields
