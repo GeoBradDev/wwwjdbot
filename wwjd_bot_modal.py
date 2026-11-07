@@ -59,13 +59,13 @@ def build_prompt(text: str) -> str:
 FIELDS = ("reference", "verse", "explanation")
 
 # A fallback value ends at a quote followed by the next quoted "key": (with
-# or without a comma), a closing brace, a line end, or the end of the text
-# (each optionally after a trailing comma).
-_VALUE_END = (
-    r'(?="(?:\s*(?:,?\s*"[A-Za-z_][A-Za-z0-9_-]*"\s*:|,?\s*\}|,?\s*\Z)'
-    r"|,?[ \t]*\r?\n))"
+# or without a comma), a closing brace, or the end of the text (each
+# optionally after a trailing comma). Only when none of these gives an
+# acceptable value for a start does a quote before a line end count.
+_STRICT_VALUE = re.compile(
+    r'(.*?)(?="\s*(?:,?\s*"[A-Za-z_][A-Za-z0-9_-]*"\s*:|,?\s*\}|,?\s*\Z))', re.DOTALL
 )
-_VALUE = re.compile(r"(.*?)" + _VALUE_END, re.DOTALL)
+_LINE_END_VALUE = re.compile(r'(.*?)(?=",?[ \t]*\r?\n)', re.DOTALL)
 # A captured value that contains another field's key ran past its own end.
 _FIELD_KEY = re.compile(r'"(?:reference|verse|explanation)"\s*:')
 
@@ -132,9 +132,10 @@ def _decode_fallback_value(value: str) -> str:
 
 def _find_fallback_value(generated_text: str, key: str) -> str | None:
     for start in re.finditer(rf'"{key}"\s*:\s*"', generated_text):
-        match = _VALUE.match(generated_text, start.end())
-        if match and not _FIELD_KEY.search(match.group(1)):
-            return match.group(1)
+        for value_re in (_STRICT_VALUE, _LINE_END_VALUE):
+            match = value_re.match(generated_text, start.end())
+            if match and not _FIELD_KEY.search(match.group(1)):
+                return match.group(1)
     return None
 
 
