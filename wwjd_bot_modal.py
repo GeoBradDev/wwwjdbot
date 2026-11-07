@@ -1,21 +1,27 @@
+import os
+from pathlib import Path
+
 import modal
 from pydantic import BaseModel
 import time
 
-app = modal.App("wwjd-bot")
+app = modal.App(os.environ.get("WWJD_APP_NAME", "wwjd-bot"))
 
-# Create image with needed dependencies
-image = modal.Image.debian_slim().pip_install(
-    "fastapi[standard]",
-    "transformers",
-    "torch",
-    "accelerate",
-    "bitsandbytes",
+MODEL_DIR = "/root/.cache/huggingface"
+REQUIREMENTS = Path(__file__).parent / "requirements.txt"
+
+# Create image with pinned dependencies from the compiled lock file
+image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .uv_pip_install(requirements=[str(REQUIREMENTS)], uv_version="0.10.3")
+    .env({"HF_HOME": MODEL_DIR})
 )
 
 # Use a persistent volume to cache Hugging Face models
-model_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
-MODEL_DIR = "/root/.cache/huggingface"
+model_volume = modal.Volume.from_name(
+    os.environ.get("WWJD_HF_CACHE_VOLUME", "huggingface-cache"),
+    create_if_missing=True,
+)
 
 
 class VerseRequest(BaseModel):
@@ -36,11 +42,10 @@ def match_verse(text: str):
     import re
     import json
 
-    os.environ["TRANSFORMERS_CACHE"] = MODEL_DIR
     model_name = "mistralai/Mistral-7B-Instruct-v0.2"
     token = os.environ.get("HUGGINGFACE_TOKEN")
-    from huggingface_hub import login
-    login(token)
+    if not token:
+        raise RuntimeError("HUGGINGFACE_TOKEN is not set; attach the huggingface-token Modal Secret")
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -50,13 +55,13 @@ def match_verse(text: str):
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
-        use_auth_token=token
+        token=token
     )
     tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        use_auth_token=token,
+        token=token,
         quantization_config=bnb_config,
         device_map="auto",
     )

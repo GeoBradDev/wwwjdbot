@@ -1,0 +1,5 @@
+# Local tooling for deploying and testing the Modal app.
+# pydantic must match the version in requirements.txt (the app imports it at top level).
+modal==1.6.3
+pytest==9.2.0
+pydantic==2.14.3
