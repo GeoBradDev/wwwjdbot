@@ -44,17 +44,23 @@ def _full_text_image_env() -> dict:
 MODEL_DIR = "/root/.cache/huggingface"
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.2"
 REQUIREMENTS = Path(__file__).parent / "requirements.txt"
+API_REQUIREMENTS = Path(__file__).parent / "requirements-api.txt"
 
-# Create image with pinned dependencies from the compiled lock file
+# GPU image for MatchVerse, with pinned dependencies from the compiled lock file
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .uv_pip_install(requirements=[str(REQUIREMENTS)], uv_version="0.10.3")
     .env({"HF_HOME": MODEL_DIR})
 )
+# CPU image for verse_api: FastAPI and pydantic only, from its own lock
+api_image = modal.Image.debian_slim(python_version="3.12").uv_pip_install(
+    requirements=[str(API_REQUIREMENTS)], uv_version="0.10.3"
+)
 # WWJD_LOG_FULL_TEXT=1 in the shell that runs modal serve/deploy turns full
-# text logging on in both containers; by default the image is unchanged.
+# text logging on in both containers; by default the images are unchanged.
 if _full_text_image_env():
     image = image.env(_full_text_image_env())
+    api_image = api_image.env(_full_text_image_env())
 
 # Use a persistent volume to cache Hugging Face models
 model_volume = modal.Volume.from_name(
@@ -279,7 +285,7 @@ def parse_model_output(generated_text: str, model_name: str, elapsed_time: float
 
 
 class MatchVerseError(RuntimeError):
-    """Raised by match_verse in place of any failure after the token check; carries only the request id."""
+    """Raised by MatchVerse.match in place of any generation failure; carries only the request id."""
 
 
 def _run_guarded(request_id: str, func, *args):
@@ -307,11 +313,9 @@ def _log_generation(request_id, text, prompt, generated_text, elapsed_time, mode
     return result
 
 
-def _generate_verse(text: str, request_id: str, token: str) -> dict:
+def _load_model(token: str):
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-
-    model_name = MODEL_NAME
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -320,19 +324,24 @@ def _generate_verse(text: str, request_id: str, token: str) -> dict:
     )
 
     tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
+        MODEL_NAME,
         token=token
     )
     tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
-        model_name,
+        MODEL_NAME,
         token=token,
         quantization_config=bnb_config,
         device_map="auto",
     )
 
     model.eval()
+    return tokenizer, model
+
+
+def _generate_verse(tokenizer, model, text: str, request_id: str) -> dict:
+    import torch
 
     prompt = build_prompt(text)
 
@@ -354,43 +363,64 @@ def _generate_verse(text: str, request_id: str, token: str) -> dict:
     generated_text = tokenizer.decode(output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
     elapsed_time = time.time() - start_time
 
-    return _log_generation(request_id, text, prompt, generated_text, elapsed_time, model_name)
+    return _log_generation(request_id, text, prompt, generated_text, elapsed_time, MODEL_NAME)
 
 
-@app.function(
+# One GPU container serves many requests: the enter hook loads the model once
+# per container, and scaledown_window keeps a warm container for 5 idle minutes.
+@app.cls(
     image=image,
     volumes={MODEL_DIR: model_volume},
     timeout=600,
     gpu="T4",
-    secrets=[modal.Secret.from_name("huggingface-token")]
+    scaledown_window=300,
+    secrets=[modal.Secret.from_name("huggingface-token")],
 )
-def match_verse(text: str, request_id: str | None = None):
-    request_id = _normalize_request_id(request_id)
-    # Checked before the guard: this fixed message holds no user text.
-    token = os.environ.get("HUGGINGFACE_TOKEN")
-    if not token:
-        raise RuntimeError("HUGGINGFACE_TOKEN is not set; attach the huggingface-token Modal Secret")
-    return _run_guarded(request_id, _generate_verse, text, request_id, token)
+class MatchVerse:
+    @modal.enter()
+    def load(self):
+        # Runs before any request text exists, so a failure here cannot carry
+        # user text; it is not wrapped in _run_guarded.
+        token = os.environ.get("HUGGINGFACE_TOKEN")
+        if not token:
+            raise RuntimeError("HUGGINGFACE_TOKEN is not set; attach the huggingface-token Modal Secret")
+        start = time.time()
+        self.tokenizer, self.model = _load_model(token)
+        logger.info("model loaded: load_time=%.2fs", time.time() - start)
 
+    @modal.method()
+    def match(self, text: str, request_id: str | None = None):
+        request_id = _normalize_request_id(request_id)
+        return _run_guarded(request_id, _generate_verse, self.tokenizer, self.model, text, request_id)
+
+
+MAX_TEXT_LENGTH = 4000
 
 ERROR_EMPTY_TEXT = "The 'text' field must be a non-empty string."
 ERROR_UNPARSEABLE = "The model returned a response that could not be parsed."
 ERROR_INTERNAL = "Internal error while processing the request."
+ERROR_TEXT_TOO_LONG = f"The 'text' field must be at most {MAX_TEXT_LENGTH} characters."
 
 
-def handle_verse_request(text, match) -> tuple[int, dict]:
+async def handle_verse_request(text, match) -> tuple[int, dict]:
     request_id = uuid.uuid4().hex
 
     if not isinstance(text, str) or not text.strip():
         logger.info("[%s] rejected: status=422 reason=empty_text", request_id)
         return 422, {"error": ERROR_EMPTY_TEXT, "id": request_id}
 
+    # Checked here rather than with Field(max_length=...): FastAPI's own 422
+    # body would echo the submitted text back.
+    if len(text) > MAX_TEXT_LENGTH:
+        logger.info("[%s] rejected: status=422 reason=text_too_long input_length=%d", request_id, len(text))
+        return 422, {"error": ERROR_TEXT_TOO_LONG, "id": request_id}
+
     logger.info("[%s] request: input_length=%d", request_id, len(text))
     if _log_full_text():
         logger.info("[%s] input text: %r", request_id, text)
 
     try:
-        result = match(text, request_id=request_id)
+        result = await match(text, request_id=request_id)
     except Exception as e:  # noqa: BLE001 any failure becomes a generic 500
         _log_exception(request_id, "match_verse call", e)
         logger.info("[%s] done: status=500", request_id)
@@ -412,10 +442,11 @@ def handle_verse_request(text, match) -> tuple[int, dict]:
     return 502, {"error": ERROR_UNPARSEABLE, "id": request_id}
 
 
-@app.function(image=image, gpu="any", timeout=600)
+# No GPU: this container only validates, awaits MatchVerse and maps the result.
+@app.function(image=api_image, timeout=600)
 @modal.fastapi_endpoint(method="POST", docs=True)
 async def verse_api(body: VerseRequest):
     from fastapi.responses import JSONResponse
 
-    status, payload = handle_verse_request(body.text, match_verse.remote)
+    status, payload = await handle_verse_request(body.text, MatchVerse().match.remote.aio)
     return JSONResponse(status_code=status, content=payload)

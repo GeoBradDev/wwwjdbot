@@ -132,6 +132,7 @@ def _load_lines(caplog):
 # Criterion 1: load once per container
 
 
+@pytest.mark.filterwarnings("ignore:The MatchVerse.match function is executing locally")
 def test_match_local_loads_the_model_once_per_instance(app_module, fake_ml, caplog):
     instance = app_module.MatchVerse()
     first = instance.match.local("Some statement")

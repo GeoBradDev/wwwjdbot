@@ -46,7 +46,7 @@ def _stub_module(name, **attrs):
     return module
 
 
-@pytest.mark.filterwarnings("ignore:The match_verse function is executing locally")
+@pytest.mark.filterwarnings("ignore:The MatchVerse.match function is executing locally")
 def test_missing_hf_token_fails_loudly(monkeypatch):
     calls = []
 
@@ -72,7 +72,7 @@ def test_missing_hf_token_fails_loudly(monkeypatch):
     try:
         module = importlib.import_module("wwjd_bot_modal")
         with pytest.raises(RuntimeError, match="HUGGINGFACE_TOKEN"):
-            module.match_verse.local("some statement")
+            module.MatchVerse().match.local("some statement")
     finally:
         sys.modules.pop("wwjd_bot_modal", None)
     assert calls == [], "model load was attempted without a token"
