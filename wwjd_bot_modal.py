@@ -292,9 +292,9 @@ def _run_guarded(request_id: str, func, *args):
     try:
         return func(*args)
     except Exception as e:  # noqa: BLE001 log safely, then re-raise without the message
-        _log_exception(request_id, "match_verse", e)
+        _log_exception(request_id, "MatchVerse.match", e)
     # Raised outside the except block, so it has no __cause__ or __context__.
-    raise MatchVerseError(f"match_verse failed for request {request_id}")
+    raise MatchVerseError(f"MatchVerse.match failed for request {request_id}")
 
 
 def _log_generation(request_id, text, prompt, generated_text, elapsed_time, model_name) -> dict:
@@ -422,7 +422,7 @@ async def handle_verse_request(text, match) -> tuple[int, dict]:
     try:
         result = await match(text, request_id=request_id)
     except Exception as e:  # noqa: BLE001 any failure becomes a generic 500
-        _log_exception(request_id, "match_verse call", e)
+        _log_exception(request_id, "MatchVerse.match call", e)
         logger.info("[%s] done: status=500", request_id)
         return 500, {"error": ERROR_INTERNAL, "id": request_id}
 
