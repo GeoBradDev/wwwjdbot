@@ -52,7 +52,7 @@ image = (
     .uv_pip_install(requirements=[str(REQUIREMENTS)], uv_version="0.10.3")
     .env({"HF_HOME": MODEL_DIR})
 )
-# CPU image for verse_api: FastAPI and pydantic only, from its own lock
+# CPU image for verse_api: fastapi[standard] and pydantic, no torch, from its own lock
 api_image = modal.Image.debian_slim(python_version="3.12").uv_pip_install(
     requirements=[str(API_REQUIREMENTS)], uv_version="0.10.3"
 )
