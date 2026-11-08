@@ -47,9 +47,11 @@ class _Match:
         self.result = result
         self.exc = exc
         self.calls = []
+        self.request_ids = []
 
-    def __call__(self, text):
+    def __call__(self, text, request_id=None):
         self.calls.append(text)
+        self.request_ids.append(request_id)
         if self.exc is not None:
             raise self.exc
         return self.result
