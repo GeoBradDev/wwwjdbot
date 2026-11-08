@@ -1,8 +1,9 @@
-"""Characterization tests for issue #6: prompt building and model output
-parsing move out of match_verse into pure functions, with identical behavior.
+"""Prompt building and model output parsing as pure functions.
 
-These pin the behavior as of commit 6b16340, including the invalid-JSON
-"Parsing failed" path that issue #3 will change later."""
+The build_prompt tests are characterization tests from issue #6 and pin the
+prompt as of commit 6b16340. The parse_model_output tests pin the issue #3
+behavior: the regex fallback runs whenever JSON parsing fails, and any output
+without three non-empty string fields is a parse failure."""
 
 import importlib
 import sys
@@ -118,43 +119,93 @@ def test_parse_json_embedded_in_prose(app_module):
     assert result == _ok("John 13:34", "Love one another", "Jesus commands love.")
 
 
-def test_parse_json_missing_key_falls_back_to_regex(app_module):
+def test_parse_strips_whitespace_around_json_values(app_module):
+    generated = '{"reference": " Luke 6:31 ", "verse": "\\nDo to others\\n", "explanation": " x "}'
+    result = app_module.parse_model_output(generated, MODEL, 1.234)
+    assert result == _ok("Luke 6:31", "Do to others", "x")
+
+
+def _failed(generated):
+    return {"error": "parse_failed", "raw_output": generated}
+
+
+def test_parse_json_missing_key_is_parse_failure(app_module):
     generated = '{"reference": "John 3:16", "verse": "For God so loved the world"}'
     result = app_module.parse_model_output(generated, MODEL, 1.234)
-    assert result == _ok("John 3:16", "For God so loved the world", "")
+    assert result == _failed(generated)
 
 
-def test_parse_fields_without_braces_use_regex(app_module):
+def test_parse_partial_fields_without_braces_is_parse_failure(app_module):
     generated = 'reference: x "reference": "Luke 6:31" and "explanation": "Golden rule."'
     result = app_module.parse_model_output(generated, MODEL, 1.234)
-    assert result == _ok("Luke 6:31", "", "Golden rule.")
+    assert result == _failed(generated)
 
 
-def test_parse_invalid_json_returns_parsing_failed(app_module):
-    # Current behavior (issue #3 will change it): invalid JSON inside braces
-    # short-circuits to an error dict even though the regex could match.
-    generated = '{"reference": "Matthew 5:44", "verse": "Love your enemies",}'
+def test_parse_all_fields_without_braces_use_regex(app_module):
+    generated = (
+        'Answer: "reference": "Luke 6:31", "verse": "Do to others as you would'
+        ' have them do to you", "explanation": "Golden rule."'
+    )
     result = app_module.parse_model_output(generated, MODEL, 1.234)
-    assert result == {
-        "error": "Parsing failed: Expecting property name enclosed in double"
-        " quotes: line 1 column 60 (char 59)",
-        "raw_output": generated,
-    }
+    assert result == _ok(
+        "Luke 6:31", "Do to others as you would have them do to you", "Golden rule."
+    )
 
 
-def test_parse_no_braces_no_fields_returns_text_as_explanation(app_module):
-    generated = "Love your neighbor as yourself."
+def test_parse_trailing_comma_falls_back_to_regex(app_module):
+    generated = (
+        '{"reference": "Matthew 5:44", "verse": "Love your enemies",'
+        ' "explanation": "Hate is not the way.",}'
+    )
     result = app_module.parse_model_output(generated, MODEL, 1.234)
-    assert result == _ok("", "", generated)
+    assert result == _ok("Matthew 5:44", "Love your enemies", "Hate is not the way.")
 
 
-def test_parse_greedy_brace_match_spans_two_objects(app_module):
+def test_parse_unescaped_quote_in_verse(app_module):
+    generated = (
+        '{"reference": "Matthew 22:39", "verse": "He said "love your neighbor"'
+        ' to them", "explanation": "x"}'
+    )
+    result = app_module.parse_model_output(generated, MODEL, 1.234)
+    assert result == _ok("Matthew 22:39", 'He said "love your neighbor" to them', "x")
+
+
+def test_parse_escaped_quote_in_fallback_value_is_decoded(app_module):
+    # The trailing comma makes the JSON invalid, so only the fallback can
+    # read this; the old [^"]+ regex stopped at the backslash.
+    generated = (
+        '{"reference": "Matthew 22:39", "verse": "He said \\"love\\" them",'
+        ' "explanation": "Line one\\nline two",}'
+    )
+    result = app_module.parse_model_output(generated, MODEL, 1.234)
+    assert result == _ok("Matthew 22:39", 'He said "love" them', "Line one\nline two")
+
+
+def test_parse_two_objects_returns_first(app_module):
     generated = (
         '{"reference": "A", "verse": "B", "explanation": "C"}\n'
         '{"reference": "D", "verse": "E", "explanation": "F"}'
     )
     result = app_module.parse_model_output(generated, MODEL, 1.234)
-    assert result == {
-        "error": "Parsing failed: Extra data: line 2 column 1 (char 53)",
-        "raw_output": generated,
-    }
+    assert result == _ok("A", "B", "C")
+
+
+def test_parse_no_json_is_parse_failure(app_module):
+    generated = "Love your neighbor as yourself."
+    result = app_module.parse_model_output(generated, MODEL, 1.234)
+    assert result == _failed(generated)
+
+
+@pytest.mark.parametrize(
+    "generated",
+    [
+        '{"reference": 5, "verse": "Love your enemies", "explanation": "x"}',
+        '{"reference": "Luke 6:31", "verse": null, "explanation": "x"}',
+        '{"reference": "Luke 6:31", "verse": "Do to others", "explanation": ""}',
+        '{"reference": "Luke 6:31", "verse": "   ", "explanation": "x"}',
+        '{"reference": "Luke 6:31", "verse": "Do to others", "explanation": ["x"]}',
+    ],
+)
+def test_parse_non_string_or_empty_values_are_parse_failure(app_module, generated):
+    result = app_module.parse_model_output(generated, MODEL, 1.234)
+    assert result == _failed(generated)

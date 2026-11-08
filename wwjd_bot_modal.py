@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 
 import modal
@@ -55,54 +56,148 @@ def build_prompt(text: str) -> str:
     [/INST]"""
 
 
-def parse_model_output(generated_text: str, model_name: str, elapsed_time: float) -> dict:
-    json_match = re.search(r'({[\s\S]*})', generated_text)
+FIELDS = ("reference", "verse", "explanation")
 
+# A fallback value ends, in this order of preference for each start, at a
+# quote followed by: (1) the next quoted "key": (with or without a comma) or
+# an optional comma and a closing brace; (2) an optional comma, spaces or
+# tabs, and a line end; (3) an optional comma and whitespace to the end of
+# the text.
+_VALUE_TIERS = tuple(
+    re.compile(r"(.*?)(?=" + end + ")", re.DOTALL)
+    for end in (
+        r'"\s*(?:,?\s*"[A-Za-z_][A-Za-z0-9_-]*"\s*:|,?\s*\})',
+        r'",?[ \t]*\r?\n',
+        r'"\s*,?\s*\Z',
+    )
+)
+# A captured value that contains another field's key ran past its own end.
+_FIELD_KEY = re.compile(r'"(?:reference|verse|explanation)"\s*:')
+
+
+def _encodable(value: str) -> bool:
+    # A lone surrogate (for example from \ud800) makes Starlette's JSONResponse
+    # raise UnicodeEncodeError outside the handler.
     try:
-        if json_match:
-            json_str = json_match.group(1)
-            response_json = json.loads(json_str)
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
-            if all(k in response_json for k in ['reference', 'verse', 'explanation']):
-                return {
-                    "reference": response_json["reference"],
-                    "verse": response_json["verse"],
-                    "explanation": response_json["explanation"],
-                    "model": model_name,
-                    "generation_time": f"{elapsed_time:.2f} seconds"
-                }
 
-        reference_pattern = re.compile(r'"reference"\s*:\s*"([^"]+)"')
-        verse_pattern = re.compile(r'"verse"\s*:\s*"([^"]+)"')
-        explanation_pattern = re.compile(r'"explanation"\s*:\s*"([^"]+)"')
+def _non_empty_strings(values: dict) -> dict | None:
+    fields = {}
+    for key in FIELDS:
+        value = values.get(key)
+        if not isinstance(value, str) or not value.strip() or not _encodable(value):
+            return None
+        fields[key] = value.strip()
+    return fields
 
-        reference_match = reference_pattern.search(generated_text)
-        verse_match = verse_pattern.search(generated_text)
-        explanation_match = explanation_pattern.search(generated_text)
 
-        reference = reference_match.group(1) if reference_match else ""
-        verse = verse_match.group(1) if verse_match else ""
-        explanation = explanation_match.group(1) if explanation_match else ""
+def _parse_json_fields(generated_text: str) -> tuple[dict | None, str]:
+    """Return the first qualifying fields, and the text for the fallback: the
+    output with every valid but non-qualifying object that has all three
+    keys replaced by _CUT."""
+    decoder = json.JSONDecoder()
+    spans = []
+    for match in re.finditer(r"\{", generated_text):
+        try:
+            value, end = decoder.raw_decode(generated_text, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            fields = _non_empty_strings(value)
+            if fields:
+                return fields, generated_text
+            if all(key in value for key in FIELDS):
+                spans.append((match.start(), end))
+    return None, _remove_spans(generated_text, spans)
 
-        if reference or verse or explanation:
-            return {
-                "reference": reference,
-                "verse": verse,
-                "explanation": explanation,
-                "model": model_name,
-                "generation_time": f"{elapsed_time:.2f} seconds"
-            }
 
-        return {
-            "reference": "",
-            "verse": "",
-            "explanation": generated_text,
-            "model": model_name,
-            "generation_time": f"{elapsed_time:.2f} seconds"
-        }
+# Marks where an ignored object was cut out. It is not whitespace, so a
+# "key": right before the cut does not start a value, and a fallback value
+# containing it would span the cut and is not used.
+_CUT = "\x00"
 
-    except Exception as e:  # noqa: BLE001 issue #3 reworks this handler
-        return {"error": f"Parsing failed: {str(e)}", "raw_output": generated_text}
+
+def _remove_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    parts = []
+    position = 0
+    for start, end in merged:
+        parts.append(text[position:start])
+        parts.append(_CUT)
+        position = end
+    parts.append(text[position:])
+    return "".join(parts)
+
+
+_SIMPLE_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+_ESCAPE = re.compile(
+    r"\\u([dD][89abAB][0-9a-fA-F]{2})\\u([dD][c-fC-F][0-9a-fA-F]{2})"
+    r'|\\(["\\/bfnrt])'
+    r"|\\u([0-9a-fA-F]{4})"
+)
+
+
+def _decode_escape(match: re.Match) -> str:
+    high, low, simple, code = match.groups()
+    if high:
+        return chr(0x10000 + ((int(high, 16) - 0xD800) << 10) + (int(low, 16) - 0xDC00))
+    if simple:
+        return _SIMPLE_ESCAPES[simple]
+    return chr(int(code, 16))
+
+
+def _decode_fallback_value(value: str) -> str:
+    try:
+        return json.loads('"' + value + '"')
+    except json.JSONDecodeError:
+        # One left-to-right pass, so "\\n" is a backslash then "n". Unknown
+        # escapes stay as written; a lone surrogate is rejected later.
+        return _ESCAPE.sub(_decode_escape, value)
+
+
+def _find_fallback_value(generated_text: str, key: str) -> str | None:
+    for start in re.finditer(rf'"{key}"\s*:\s*"', generated_text):
+        for value_re in _VALUE_TIERS:
+            match = value_re.match(generated_text, start.end())
+            if not match:
+                continue
+            if not match.group(1).strip():
+                # An empty value: a later tier would only reach a later quote.
+                break
+            if _CUT not in match.group(1) and not _FIELD_KEY.search(match.group(1)):
+                return match.group(1)
+    return None
+
+
+def _parse_regex_fields(generated_text: str) -> dict | None:
+    values = {}
+    for key in FIELDS:
+        value = _find_fallback_value(generated_text, key)
+        if value is not None:
+            values[key] = _decode_fallback_value(value)
+    return _non_empty_strings(values)
+
+
+def parse_model_output(generated_text: str, model_name: str, elapsed_time: float) -> dict:
+    fields, fallback_text = _parse_json_fields(generated_text)
+    if not fields:
+        fields = _parse_regex_fields(fallback_text)
+    if not fields:
+        return {"error": "parse_failed", "raw_output": generated_text}
+    return {
+        **fields,
+        "model": model_name,
+        "generation_time": f"{elapsed_time:.2f} seconds",
+    }
 
 
 @app.function(
@@ -171,22 +266,40 @@ def match_verse(text: str):
     return parse_model_output(generated_text, model_name, elapsed_time)
 
 
+ERROR_EMPTY_TEXT = "The 'text' field must be a non-empty string."
+ERROR_UNPARSEABLE = "The model returned a response that could not be parsed."
+ERROR_INTERNAL = "Internal error while processing the request."
+
+
+def handle_verse_request(text, match) -> tuple[int, dict]:
+    request_id = uuid.uuid4().hex
+
+    if not isinstance(text, str) or not text.strip():
+        return 422, {"error": ERROR_EMPTY_TEXT, "id": request_id}
+
+    try:
+        result = match(text)
+    except Exception as e:  # noqa: BLE001 any failure becomes a generic 500
+        print(f"[{request_id}] match_verse failed: {type(e).__name__}: {e}")
+        return 500, {"error": ERROR_INTERNAL, "id": request_id}
+
+    if not isinstance(result, dict):
+        reason = f"result is {type(result).__name__}, not dict"
+    elif "error" in result:
+        reason = f"match_verse returned error {result['error']!r}"
+    else:
+        fields = _non_empty_strings(result)
+        if fields:
+            return 200, {"raw": fields}
+        reason = "a field is missing, empty or not a string"
+    print(f"[{request_id}] unparseable model output: {reason}")
+    return 502, {"error": ERROR_UNPARSEABLE, "id": request_id}
+
+
 @app.function(image=image, gpu="any", timeout=600)
 @modal.fastapi_endpoint(method="POST", docs=True)
 async def verse_api(body: VerseRequest):
-    text = body.text
+    from fastapi.responses import JSONResponse
 
-    if not text:
-        return {"error": "Missing 'text' field in request"}
-
-    try:
-        result = match_verse.remote(text)
-        return {
-            "raw": {
-                "reference": result.get("reference", ""),
-                "verse": result.get("verse", ""),
-                "explanation": result.get("explanation", "")
-            }
-        }
-    except Exception as e:  # noqa: BLE001 issue #3 reworks this handler
-        return {"error": f"Processing failed: {str(e)}"}
+    status, payload = handle_verse_request(body.text, match_verse.remote)
+    return JSONResponse(status_code=status, content=payload)
