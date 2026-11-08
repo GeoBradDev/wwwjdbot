@@ -154,7 +154,9 @@ whitespace; there is no empty success. The rules, from `parse_model_output`:
   unacceptable (`502`). Known limits: a later quote in the output can end the last value,
   giving a `200` with the wrong text. This happens when same-line prose after the value
   ends in a quote (`"explanation": "C" as Jesus said "love"`), and when same-line prose is
-  followed by a later line ending in a quote. Without such a quote, same-line prose gives
+  followed by a later line ending in a quote, and when a brace-less empty last value has a
+  space before its comma (`"explanation": "" ,` then a later line ending in a quote).
+  Without such a quote, same-line prose gives
   a `502` (`"explanation": "C" I hope this helps`).
 - If the fallback does not find all three as non-empty strings, `match_verse` returns
   `{"error": "parse_failed", "raw_output": ...}` and `verse_api` responds `502`.
