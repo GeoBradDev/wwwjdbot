@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import importlib
 import inspect
+import json
 import logging
 import re
 import sys
@@ -276,6 +277,19 @@ def _stub_fastapi(monkeypatch):
     monkeypatch.setitem(sys.modules, "fastapi.responses", responses)
 
 
+class _JSONRequest:
+    """Stands in for the raw request verse_api reads (issue #12): the same JSON
+    body that VerseRequest(text=...) used to carry."""
+
+    def __init__(self, text):
+        self._body = json.dumps({"text": text}).encode()
+        self.headers = {"content-length": str(len(self._body))}
+
+    async def stream(self):
+        yield self._body
+        yield b""
+
+
 class _Remote:
     """Stands in for MatchVerse().match.remote: calling it blocks, so it fails."""
 
@@ -311,8 +325,8 @@ def test_two_concurrent_requests_both_reach_the_gpu_call(app_module, monkeypatch
         _patch_match_verse(app_module, monkeypatch, aio)
         raw = inspect.unwrap(app_module.verse_api._raw_f_)
         return await asyncio.gather(
-            raw(app_module.VerseRequest(text="first")),
-            raw(app_module.VerseRequest(text="second")),
+            raw(_JSONRequest("first")),
+            raw(_JSONRequest("second")),
         )
 
     responses = asyncio.run(scenario())
@@ -381,7 +395,7 @@ def test_verse_api_rejects_over_long_text_before_the_gpu_call(app_module, monkey
     match = _AsyncMatch()
     _patch_match_verse(app_module, monkeypatch, match)
     raw = inspect.unwrap(app_module.verse_api._raw_f_)
-    response = asyncio.run(raw(app_module.VerseRequest(text="a" * 4001)))
+    response = asyncio.run(raw(_JSONRequest("a" * 4001)))
     assert response.status_code == 422
     assert response.content["error"] == app_module.ERROR_TEXT_TOO_LONG
     assert match.calls == []

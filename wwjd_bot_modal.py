@@ -8,7 +8,15 @@ import uuid
 from pathlib import Path
 
 import modal
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
+
+try:
+    # FastAPI resolves verse_api's annotation from this module's globals and
+    # passes the raw request for starlette's Request. The API container has
+    # starlette (via fastapi); local tooling and CI do not, and never serve.
+    from starlette.requests import Request
+except ImportError:
+    Request = None
 
 app = modal.App(os.environ.get("WWJD_APP_NAME", "wwjd-bot"))
 
@@ -40,6 +48,35 @@ if _log_full_text():
 
 def _full_text_image_env() -> dict:
     return {LOG_FULL_TEXT_ENV: "1"} if _log_full_text() else {}
+
+MAX_GPU_CONTAINERS_ENV = "WWJD_MAX_GPU_CONTAINERS"
+DEFAULT_MAX_GPU_CONTAINERS = 2
+# Modal stores max_containers as a uint32 and rejects anything larger.
+_MAX_GPU_CONTAINERS_LIMIT = 2**32 - 1
+
+
+def _max_gpu_containers() -> int:
+    # Read at import, like WWJD_APP_NAME: the value in the shell that runs
+    # modal deploy is what Modal registers. A bad value fails the deploy
+    # instead of silently removing the cap.
+    raw = os.environ.get(MAX_GPU_CONTAINERS_ENV, "").strip()
+    if not raw:
+        return DEFAULT_MAX_GPU_CONTAINERS
+    digits = raw.lstrip("0")
+    # The length check comes first: int() refuses strings over 4300 digits.
+    if (
+        not re.fullmatch(r"[0-9]+", raw)
+        or not digits
+        or len(digits) > len(str(_MAX_GPU_CONTAINERS_LIMIT))
+        or int(digits) > _MAX_GPU_CONTAINERS_LIMIT
+    ):
+        raise ValueError(f"{MAX_GPU_CONTAINERS_ENV} must be a whole number from 1 to {_MAX_GPU_CONTAINERS_LIMIT}")
+    return int(digits)
+
+
+# Upper bound on concurrently running MatchVerse (GPU) containers; requests
+# beyond it queue in Modal.
+MAX_GPU_CONTAINERS = _max_gpu_containers()
 
 MODEL_DIR = "/root/.cache/huggingface"
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.2"
@@ -340,12 +377,52 @@ def _load_model(token: str):
     return tokenizer, model
 
 
+# A cost bound, not a fit bound: Mistral-7B-Instruct-v0.2 takes 32,768 tokens.
+# Measured with the cached Mistral tokenizer, build_prompt(text) for 4000
+# characters is: template alone 241, English 1113, Russian 2110, Arabic 3775,
+# Thai 4242, common emoji 4242, Hindi 4398, Japanese 4550, Chinese 4606,
+# Korean 5031; Tamil, Bengali, Kannada, Khmer, Greek, Hebrew, Georgian,
+# Vietnamese, code and URLs also fit at full length. Common CJK and emoji are
+# single tokens. Scripts the vocabulary mostly splits into byte tokens fit
+# only at shorter lengths, for example (tokens at 4000, characters accepted)
+# Punjabi 9576 (2527), Malayalam 9278 (2613), Amharic 8846 (2744), Gujarati
+# 7876 (3091), Sinhala 7606 (3206), Telugu 6666 (3675), Burmese 6362 (3858),
+# Classical Chinese 6270 (3920), Traditional Chinese news text 6198 (3964);
+# see README "Cost limits". Rare CJK is about 3 tokens per
+# character (12242) and characters outside the vocabulary such as U+20000
+# about 4 (16242). 6144 (about 1.5 tokens per character at 4000) is a cost
+# bound; raise it here to accept more. Prompt plus 500 new tokens stays under
+# 6,700.
+MAX_PROMPT_TOKENS = 6144
+RESULT_INPUT_TOO_LONG = "input_too_long"
+
+
+def _tokenize_capped(tokenizer, prompt: str, max_tokens: int):
+    """Tokenize prompt once. Return (inputs, token_count) when the count is at
+    most max_tokens, else (None, token_count)."""
+    inputs = tokenizer(prompt, return_tensors="pt")
+    count = inputs.input_ids.shape[1]
+    if count > max_tokens:
+        return None, count
+    return inputs, count
+
+
 def _generate_verse(tokenizer, model, text: str, request_id: str) -> dict:
     import torch
 
     prompt = build_prompt(text)
 
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    inputs, prompt_tokens = _tokenize_capped(tokenizer, prompt, MAX_PROMPT_TOKENS)
+    if inputs is None:
+        logger.info(
+            "[%s] rejected: reason=input_too_long input_length=%d prompt_tokens=%d max_prompt_tokens=%d",
+            request_id,
+            len(text),
+            prompt_tokens,
+            MAX_PROMPT_TOKENS,
+        )
+        return {"error": RESULT_INPUT_TOO_LONG}
+    inputs = inputs.to(model.device)
     start_time = time.time()
 
     with torch.no_grad():
@@ -374,6 +451,7 @@ def _generate_verse(tokenizer, model, text: str, request_id: str) -> dict:
     timeout=600,
     gpu="T4",
     scaledown_window=300,
+    max_containers=MAX_GPU_CONTAINERS,
     secrets=[modal.Secret.from_name("huggingface-token")],
 )
 class MatchVerse:
@@ -400,6 +478,7 @@ ERROR_EMPTY_TEXT = "The 'text' field must be a non-empty string."
 ERROR_UNPARSEABLE = "The model returned a response that could not be parsed."
 ERROR_INTERNAL = "Internal error while processing the request."
 ERROR_TEXT_TOO_LONG = f"The 'text' field must be at most {MAX_TEXT_LENGTH} characters."
+ERROR_TOO_MANY_TOKENS = "The 'text' field is too long for the model; select less text."
 
 
 async def handle_verse_request(text, match) -> tuple[int, dict]:
@@ -426,6 +505,10 @@ async def handle_verse_request(text, match) -> tuple[int, dict]:
         logger.info("[%s] done: status=500", request_id)
         return 500, {"error": ERROR_INTERNAL, "id": request_id}
 
+    if isinstance(result, dict) and result.get("error") == RESULT_INPUT_TOO_LONG:
+        logger.info("[%s] done: status=422 reason=input_too_long", request_id)
+        return 422, {"error": ERROR_TOO_MANY_TOKENS, "id": request_id}
+
     if not isinstance(result, dict):
         reason = "not_dict"
     elif "error" in result:
@@ -442,15 +525,126 @@ async def handle_verse_request(text, match) -> tuple[int, dict]:
     return 502, {"error": ERROR_UNPARSEABLE, "id": request_id}
 
 
-# No GPU: this container only validates, awaits MatchVerse and maps the result.
+# A valid body is {"text": ...} with at most 4000 characters; the worst JSON
+# encoding of one character is a 12-byte surrogate pair escape, so 48,000
+# bytes plus framing. 64 KiB leaves room for whitespace.
+MAX_BODY_BYTES = 65536
+ERROR_BODY_TOO_LARGE = f"The request body must be at most {MAX_BODY_BYTES} bytes."
+_CONTENT_LENGTH = re.compile(r"[0-9]+")
+# int() refuses digit strings over Python's 4300 digit limit; any value with
+# more significant digits than this is far over the cap anyway.
+_MAX_CONTENT_LENGTH_DIGITS = 18
+
+
+async def read_limited_body(headers, chunks, max_bytes: int) -> tuple[bytes | None, str]:
+    """Return (body, "") when the body is at most max_bytes, else (None, measure).
+
+    A Content-Length above the cap rejects without reading (measure
+    "content_length=<n>", or "content_length=too_long" past 18 significant
+    digits, so the log stays short). Otherwise chunks are read until the running total
+    exceeds the cap, and nothing after that chunk is read (measure
+    "bytes_read=<n>"), so a missing or lying Content-Length is still bounded."""
+    declared = (headers.get("content-length") or "").strip()
+    if _CONTENT_LENGTH.fullmatch(declared):
+        digits = declared.lstrip("0") or "0"
+        if len(digits) > _MAX_CONTENT_LENGTH_DIGITS:
+            return None, "content_length=too_long"
+        if int(digits) > max_bytes:
+            return None, f"content_length={int(digits)}"
+    parts, total = [], 0
+    async for chunk in chunks:
+        total += len(chunk)
+        if total > max_bytes:
+            return None, f"bytes_read={total}"
+        parts.append(chunk)
+    return b"".join(parts), ""
+
+
+ERROR_BODY_UNPARSEABLE = "There was an error parsing the body"
+
+
+def _parse_verse_request(raw: bytes) -> VerseRequest:
+    """Decode and validate raw as FastAPI 0.129.2 does for a `body: VerseRequest`
+    parameter (fastapi/routing.py), raising the same exceptions so FastAPI's
+    own handlers render the same responses:
+
+    - an empty body, or the JSON value null: RequestValidationError with
+      FastAPI's missing-body error (422 {"detail": [...]});
+    - invalid JSON (including a whitespace-only body): RequestValidationError
+      with FastAPI's json_invalid error, whose input is {} rather than the body;
+    - any other failure to decode (invalid UTF-8, nesting too deep for
+      json.loads, an integer over Python's digit limit): HTTPException 400 with
+      FastAPI's fixed detail;
+    - a decoded value that does not fit {"text": str}: RequestValidationError
+      with pydantic's errors (validated with from_attributes=True, as FastAPI
+      does, so a non-object value is model_attributes_type), loc prefixed by
+      "body". If FastAPI's jsonable_encoder hits RecursionError on those
+      errors (nested input that decoded but is too deep to encode), the same
+      400 instead. This one case differs from FastAPI 0.129.2 on purpose: its
+      422 handler raised there and the client got a plain 500."""
+    missing = [{"type": "missing", "loc": ("body",), "msg": "Field required", "input": None}]
+    if raw == b"":
+        errors = missing
+    else:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            errors = [_json_invalid(e.pos, e.msg)]
+        except Exception:  # noqa: BLE001 as FastAPI: any other decode failure is a 400
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=400, detail=ERROR_BODY_UNPARSEABLE) from None
+        else:
+            if data is None:
+                # FastAPI treats a JSON null body as a missing body.
+                errors = missing
+            else:
+                # Outside the broad except: pydantic's ValidationError is a
+                # ValueError. FastAPI validates with from_attributes=True.
+                try:
+                    return VerseRequest.model_validate(data, from_attributes=True)
+                except ValidationError as e:
+                    errors = [{**error, "loc": ("body", *error["loc"])} for error in e.errors(include_url=False)]
+    from fastapi import HTTPException
+    from fastapi.encoders import jsonable_encoder
+    from fastapi.exceptions import RequestValidationError
+
+    # FastAPI's 422 handler encodes the errors, input included; deeply nested
+    # input that decoded fine would hit RecursionError there and become a 500.
+    try:
+        jsonable_encoder(errors)
+    except RecursionError:
+        raise HTTPException(status_code=400, detail=ERROR_BODY_UNPARSEABLE) from None
+    raise RequestValidationError(errors)
+
+
+def _json_invalid(position: int, message: str) -> dict:
+    return {
+        "type": "json_invalid",
+        "loc": ("body", position),
+        "msg": "JSON decode error",
+        "input": {},
+        "ctx": {"error": message},
+    }
+
+
+# No GPU: this container only reads the body with a byte cap (a 413 past it),
+# validates it, awaits MatchVerse and maps the result.
 # Up to 20 requests share one container while they wait on GPU calls; each
 # MatchVerse container still runs one input at a time. app.function must stay
 # outermost: Modal raises if concurrent is stacked above it.
 @app.function(image=api_image, timeout=600)
 @modal.concurrent(max_inputs=20)
 @modal.fastapi_endpoint(method="POST", docs=True)
-async def verse_api(body: VerseRequest):
+async def verse_api(request: Request):
     from fastapi.responses import JSONResponse
 
+    # The body is read by hand, with a byte cap, before any JSON parsing.
+    raw, measure = await read_limited_body(request.headers, request.stream(), MAX_BODY_BYTES)
+    if raw is None:
+        request_id = uuid.uuid4().hex
+        logger.info("[%s] rejected: status=413 reason=body_too_large %s", request_id, measure)
+        return JSONResponse(status_code=413, content={"error": ERROR_BODY_TOO_LARGE, "id": request_id})
+    body = _parse_verse_request(raw)
     status, payload = await handle_verse_request(body.text, MatchVerse().match.remote.aio)
     return JSONResponse(status_code=status, content=payload)

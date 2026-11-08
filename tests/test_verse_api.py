@@ -8,6 +8,7 @@ credentials are needed."""
 import asyncio
 import importlib
 import inspect
+import json
 import re
 import sys
 import types
@@ -137,6 +138,19 @@ class _JSONResponse:
         self.content = content
 
 
+class _JSONRequest:
+    """Stands in for the raw request verse_api reads (issue #12): the same JSON
+    body that VerseRequest(text=...) used to carry."""
+
+    def __init__(self, text):
+        self._body = json.dumps({"text": text}).encode()
+        self.headers = {"content-length": str(len(self._body))}
+
+    async def stream(self):
+        yield self._body
+        yield b""
+
+
 def test_verse_api_wrapper_returns_json_response(app_module, monkeypatch):
     responses = types.ModuleType("fastapi.responses")
     responses.JSONResponse = _JSONResponse
@@ -157,13 +171,13 @@ def test_verse_api_wrapper_returns_json_response(app_module, monkeypatch):
     raw = inspect.unwrap(app_module.verse_api._raw_f_)
     assert inspect.iscoroutinefunction(raw)
 
-    response = asyncio.run(raw(app_module.VerseRequest(text="Some statement")))
+    response = asyncio.run(raw(_JSONRequest("Some statement")))
     assert isinstance(response, _JSONResponse)
     assert response.status_code == 200
     assert response.content == GOOD_RAW
     assert remote.calls == ["Some statement"]
 
-    response = asyncio.run(raw(app_module.VerseRequest(text="  ")))
+    response = asyncio.run(raw(_JSONRequest("  ")))
     assert isinstance(response, _JSONResponse)
     assert response.status_code == 422
     assert response.content["error"] == app_module.ERROR_EMPTY_TEXT
