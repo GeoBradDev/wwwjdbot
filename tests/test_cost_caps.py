@@ -5,10 +5,13 @@ No GPU, torch, transformers, FastAPI or Modal credentials are needed: the
 tokenizer, model, fastapi modules and the request are fakes."""
 
 import ast
+import asyncio
+import contextlib
 import importlib
 import logging
 import re
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -91,3 +94,148 @@ def test_bad_max_gpu_containers_fails_the_import(clean_import, monkeypatch, valu
         clean_import()
     assert CAP_ENV in str(info.value)
     assert value not in str(info.value).replace(CAP_ENV, "")
+
+
+# Criterion 2: prompt token cap
+
+SENTINEL = "SENTINEL-TOKEN-TEXT"
+GENERATED = '{"reference": "Matthew 5:44", "verse": "Love your enemies", "explanation": "Hate is not the way."}'
+GOOD = {
+    "reference": "Matthew 5:44",
+    "verse": "Love your enemies",
+    "explanation": "Hate is not the way.",
+    "model": "mistralai/Mistral-7B-Instruct-v0.2",
+    "generation_time": "1.23 seconds",
+}
+GOOD_RAW = {"raw": {k: GOOD[k] for k in ("reference", "verse", "explanation")}}
+
+
+class _Inputs(dict):
+    def __init__(self, length):
+        super().__init__(input_ids=None)
+        self.input_ids = types.SimpleNamespace(shape=(1, length))
+        self.moved_to = None
+
+    def to(self, device):
+        self.moved_to = device
+        return self
+
+
+class _Tokenizer:
+    eos_token = "</s>"
+    eos_token_id = 2
+
+    def __init__(self, length):
+        self.length = length
+        self.calls = []
+
+    def __call__(self, prompt, return_tensors=None):
+        self.calls.append((prompt, return_tensors))
+        return _Inputs(self.length)
+
+    def decode(self, tokens, skip_special_tokens=False):
+        return GENERATED
+
+
+class _Model:
+    device = "cpu"
+
+    def __init__(self):
+        self.generate_calls = 0
+
+    def generate(self, **kwargs):
+        self.generate_calls += 1
+        return [[0, 1, 2, 3, 4]]
+
+
+@pytest.fixture
+def fake_torch(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(no_grad=contextlib.nullcontext, float16="float16"),
+    )
+
+
+def test_max_prompt_tokens_constant(app_module):
+    assert app_module.MAX_PROMPT_TOKENS == 4096
+    assert app_module.ERROR_TOO_MANY_TOKENS == "The 'text' field is too long for the model; select less text."
+
+
+@pytest.mark.parametrize("length", [1, 4095, 4096])
+def test_tokenize_capped_returns_the_inputs_within_the_cap(app_module, length):
+    tokenizer = _Tokenizer(length)
+    inputs, count = app_module._tokenize_capped(tokenizer, "a prompt", 4096)
+    assert inputs is not None
+    assert inputs.input_ids.shape == (1, length)
+    assert count == length
+    assert tokenizer.calls == [("a prompt", "pt")]
+
+
+def test_tokenize_capped_returns_none_over_the_cap(app_module):
+    tokenizer = _Tokenizer(4097)
+    inputs, count = app_module._tokenize_capped(tokenizer, "a prompt", 4096)
+    assert inputs is None
+    assert count == 4097
+    assert tokenizer.calls == [("a prompt", "pt")]
+
+
+def test_generate_verse_at_the_cap_generates(app_module, fake_torch):
+    tokenizer, model = _Tokenizer(4096), _Model()
+    result = app_module._generate_verse(tokenizer, model, "Some statement", "0" * 32)
+    assert model.generate_calls == 1
+    assert {k: result[k] for k in ("reference", "verse", "explanation")} == GOOD_RAW["raw"]
+    assert tokenizer.calls[0][0] == app_module.build_prompt("Some statement")
+
+
+def test_generate_verse_over_the_cap_never_generates(app_module, fake_torch, caplog):
+    tokenizer, model = _Tokenizer(4097), _Model()
+    text = SENTINEL + " more words"
+    request_id = "0123456789abcdef0123456789abcdef"
+    result = app_module._generate_verse(tokenizer, model, text, request_id)
+    assert result == {"error": "input_too_long"}
+    assert model.generate_calls == 0
+    assert SENTINEL not in caplog.text
+    assert (
+        f"[{request_id}] rejected: reason=input_too_long input_length={len(text)} "
+        "prompt_tokens=4097 max_prompt_tokens=4096"
+    ) in caplog.text
+
+
+def test_input_too_long_passes_through_run_guarded(app_module, fake_torch):
+    tokenizer, model = _Tokenizer(5000), _Model()
+    result = app_module._run_guarded(
+        "0" * 32, app_module._generate_verse, tokenizer, model, "x", "0" * 32
+    )
+    assert result == {"error": "input_too_long"}
+
+
+class _AsyncMatch:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    async def __call__(self, text, request_id=None):
+        self.calls.append(text)
+        return self.result
+
+
+def test_handle_verse_request_maps_input_too_long_to_422(app_module, caplog):
+    text = SENTINEL + " statement"
+    match = _AsyncMatch({"error": "input_too_long"})
+    status, body = asyncio.run(app_module.handle_verse_request(text, match))
+    assert status == 422
+    assert set(body) == {"error", "id"}
+    assert body["error"] == app_module.ERROR_TOO_MANY_TOKENS
+    assert ID_RE.fullmatch(body["id"])
+    assert SENTINEL not in repr(body)
+    assert SENTINEL not in caplog.text
+    assert f"[{body['id']}] done: status=422 reason=input_too_long" in caplog.text
+    assert "status=502" not in caplog.text
+
+
+def test_other_match_errors_stay_502(app_module):
+    match = _AsyncMatch({"error": "parse_failed", "raw_output": "x"})
+    status, body = asyncio.run(app_module.handle_verse_request("Some statement", match))
+    assert status == 502
+    assert body["error"] == app_module.ERROR_UNPARSEABLE

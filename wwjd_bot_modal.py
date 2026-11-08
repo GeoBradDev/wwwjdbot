@@ -360,12 +360,41 @@ def _load_model(token: str):
     return tokenizer, model
 
 
+# A cost bound, not a fit bound: Mistral-7B-Instruct-v0.2 takes 32,768 tokens.
+# The template is roughly 250 tokens and 4000 characters of text is roughly
+# 1000 to 1500 tokens (about 4000 for dense scripts), so 4096 accepts every
+# realistic selection but rejects the byte-fallback worst case (about 4
+# tokens per character). These counts are estimates; see the issue #12 plan.
+MAX_PROMPT_TOKENS = 4096
+RESULT_INPUT_TOO_LONG = "input_too_long"
+
+
+def _tokenize_capped(tokenizer, prompt: str, max_tokens: int):
+    """Tokenize prompt once. Return (inputs, token_count) when the count is at
+    most max_tokens, else (None, token_count)."""
+    inputs = tokenizer(prompt, return_tensors="pt")
+    count = inputs.input_ids.shape[1]
+    if count > max_tokens:
+        return None, count
+    return inputs, count
+
+
 def _generate_verse(tokenizer, model, text: str, request_id: str) -> dict:
     import torch
 
     prompt = build_prompt(text)
 
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    inputs, prompt_tokens = _tokenize_capped(tokenizer, prompt, MAX_PROMPT_TOKENS)
+    if inputs is None:
+        logger.info(
+            "[%s] rejected: reason=input_too_long input_length=%d prompt_tokens=%d max_prompt_tokens=%d",
+            request_id,
+            len(text),
+            prompt_tokens,
+            MAX_PROMPT_TOKENS,
+        )
+        return {"error": RESULT_INPUT_TOO_LONG}
+    inputs = inputs.to(model.device)
     start_time = time.time()
 
     with torch.no_grad():
@@ -421,6 +450,7 @@ ERROR_EMPTY_TEXT = "The 'text' field must be a non-empty string."
 ERROR_UNPARSEABLE = "The model returned a response that could not be parsed."
 ERROR_INTERNAL = "Internal error while processing the request."
 ERROR_TEXT_TOO_LONG = f"The 'text' field must be at most {MAX_TEXT_LENGTH} characters."
+ERROR_TOO_MANY_TOKENS = "The 'text' field is too long for the model; select less text."
 
 
 async def handle_verse_request(text, match) -> tuple[int, dict]:
@@ -446,6 +476,10 @@ async def handle_verse_request(text, match) -> tuple[int, dict]:
         _log_exception(request_id, "MatchVerse.match call", e)
         logger.info("[%s] done: status=500", request_id)
         return 500, {"error": ERROR_INTERNAL, "id": request_id}
+
+    if isinstance(result, dict) and result.get("error") == RESULT_INPUT_TOO_LONG:
+        logger.info("[%s] done: status=422 reason=input_too_long", request_id)
+        return 422, {"error": ERROR_TOO_MANY_TOKENS, "id": request_id}
 
     if not isinstance(result, dict):
         reason = "not_dict"
