@@ -249,7 +249,7 @@ def test_full_text_image_env(app_module, monkeypatch):
     assert app_module._full_text_image_env() == {"WWJD_LOG_FULL_TEXT": "1"}
 
 
-# _log_generation (match_verse's logging helper)
+# _log_generation (MatchVerse.match's logging helper)
 
 GEN_OK = '{"reference": "Matthew 5:44", "verse": "Love your enemies", "explanation": "' + OUTPUT + '"}'
 GEN_BAD = f"no json here {OUTPUT}"
@@ -327,7 +327,7 @@ def test_normalize_request_id_replaces_anything_else(app_module, value):
     assert result != value
 
 
-# Criterion 7: match_verse never lets the original exception out
+# Criterion 7: MatchVerse.match never lets the original exception out
 
 
 def test_run_guarded_raises_bare_match_verse_error(app_module, caplog):

@@ -1,8 +1,8 @@
-"""Issue #3: verse_api maps match_verse results to status codes.
+"""Issue #3: verse_api maps MatchVerse.match results to status codes.
 
 handle_verse_request holds the endpoint logic without importing FastAPI, so it
 runs in CI; the verse_api wrapper is tested with fastapi.responses stubbed.
-match_verse is never really called: no GPU, torch, transformers or Modal
+MatchVerse.match is never really called: no GPU, torch, transformers or Modal
 credentials are needed."""
 
 import asyncio
