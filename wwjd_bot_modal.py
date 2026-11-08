@@ -536,22 +536,39 @@ async def read_limited_body(headers, chunks, max_bytes: int) -> tuple[bytes | No
     return b"".join(parts), ""
 
 
+ERROR_BODY_UNPARSEABLE = "There was an error parsing the body"
+
+
 def _parse_verse_request(raw: bytes) -> VerseRequest:
-    """Validate raw as FastAPI does for a `body: VerseRequest` parameter, and
-    raise FastAPI's RequestValidationError with the same errors, so the client
-    gets the default 422 {"detail": [...]}. Invalid JSON gets FastAPI's own
-    json_invalid error, whose input is {} rather than the body."""
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        errors = [_json_invalid(e.pos, e.msg)]
-    except UnicodeDecodeError as e:
-        errors = [_json_invalid(e.start, "invalid UTF-8")]
+    """Decode and validate raw as FastAPI 0.129.2 does for a `body: VerseRequest`
+    parameter (fastapi/routing.py), raising the same exceptions so FastAPI's
+    own handlers render the same responses:
+
+    - an empty body: RequestValidationError with FastAPI's missing-body error
+      (422 {"detail": [...]});
+    - invalid JSON (including a whitespace-only body): RequestValidationError
+      with FastAPI's json_invalid error, whose input is {} rather than the body;
+    - any other failure to decode (invalid UTF-8, nesting too deep, an integer
+      over Python's digit limit): HTTPException 400 with FastAPI's fixed detail;
+    - a decoded value that does not fit {"text": str}: RequestValidationError
+      with pydantic's errors, loc prefixed by "body"."""
+    if raw == b"":
+        errors = [{"type": "missing", "loc": ("body",), "msg": "Field required", "input": None}]
     else:
         try:
-            return VerseRequest.model_validate(data)
-        except ValidationError as e:
-            errors = [{**error, "loc": ("body", *error["loc"])} for error in e.errors(include_url=False)]
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            errors = [_json_invalid(e.pos, e.msg)]
+        except Exception:  # noqa: BLE001 as FastAPI: any other decode failure is a 400
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=400, detail=ERROR_BODY_UNPARSEABLE) from None
+        else:
+            # Outside the broad except: pydantic's ValidationError is a ValueError.
+            try:
+                return VerseRequest.model_validate(data)
+            except ValidationError as e:
+                errors = [{**error, "loc": ("body", *error["loc"])} for error in e.errors(include_url=False)]
     from fastapi.exceptions import RequestValidationError
 
     raise RequestValidationError(errors)
