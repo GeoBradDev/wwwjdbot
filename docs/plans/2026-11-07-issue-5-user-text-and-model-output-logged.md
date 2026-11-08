@@ -186,6 +186,7 @@ Departure found during implementation: the token check stays in `match_verse`, b
 
 - `wwjd_bot_modal.py`: logger, flag, safe exception logging, request id plumbing, `_generate_verse`, `_log_generation`, `_run_guarded`, `MatchVerseError`; all `print` calls removed.
 - `tests/test_logging.py` (new): the tests in Proof.
+- `tests/test_logging_review_fixes.py` (new, review round 1, frozen): the `status=500` line, distinct exception lines in the two containers, and the import-time warning.
 - `tests/test_verse_api.py`: the `_Match` fake's `__call__` gains `request_id=None` and records it in a new `self.request_ids` list. Existing assertions stay as they are (`calls` still records only the text). Required because `handle_verse_request` now calls `match(text, request_id=...)`; this extends the fake, it does not weaken any assertion.
 - `tests/test_parse_review_fixes.py`, `tests/test_parse_review_fixes_4.py`, `tests/test_parse_review_fixes_6.py` (departure found during implementation): their one-argument `lambda text: ...` fakes for `match` become `lambda text, request_id=None: ...`, for the same reason as the `_Match` change. No assertion changes.
 - `README.md`: new "Logging and data handling" section; API contract sentence about ids in logs updated.

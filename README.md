@@ -172,7 +172,7 @@ By default each request logs metadata only:
 
 - the request id (the `id` returned in `422`, `500` and `502` bodies);
 - the input length, and for `422` the reason `empty_text`;
-- from `match_verse`: the output length, the generation time and whether the output parsed;
+- from `match_verse`: the input and output lengths, the generation time and whether the output parsed;
 - the outcome status, and for a `502` one fixed reason: `not_dict`, `match_error` or
   `invalid_fields`;
 - for an exception: the exception type names (including chained causes) and the traceback
@@ -195,8 +195,9 @@ WWJD_LOG_FULL_TEXT=1 modal serve wwjd_bot_modal.py
 ```
 
 Only the exact value `1` turns it on; any other value, or unset, means off. It is off by
-default. While it is on, importing the app logs a `WARNING` saying so, which also shows at a
-later `modal deploy` from the same shell. Redeploy without it as soon as you are done, since those logs then hold user text.
+default. While it is on, importing the app logs a `WARNING` saying so, so a flag left
+exported in the shell is visible at the next `modal deploy`. Redeploy without it as soon as you
+are done, since those logs then hold user text.
 
 ## Development
 
