@@ -41,6 +41,26 @@ if _log_full_text():
 def _full_text_image_env() -> dict:
     return {LOG_FULL_TEXT_ENV: "1"} if _log_full_text() else {}
 
+MAX_GPU_CONTAINERS_ENV = "WWJD_MAX_GPU_CONTAINERS"
+DEFAULT_MAX_GPU_CONTAINERS = 2
+
+
+def _max_gpu_containers() -> int:
+    # Read at import, like WWJD_APP_NAME: the value in the shell that runs
+    # modal deploy is what Modal registers. A bad value fails the deploy
+    # instead of silently removing the cap.
+    raw = os.environ.get(MAX_GPU_CONTAINERS_ENV, "").strip()
+    if not raw:
+        return DEFAULT_MAX_GPU_CONTAINERS
+    if not re.fullmatch(r"[0-9]+", raw) or int(raw) < 1:
+        raise ValueError(f"{MAX_GPU_CONTAINERS_ENV} must be a whole number of at least 1")
+    return int(raw)
+
+
+# Upper bound on concurrently running MatchVerse (GPU) containers; requests
+# beyond it queue in Modal.
+MAX_GPU_CONTAINERS = _max_gpu_containers()
+
 MODEL_DIR = "/root/.cache/huggingface"
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.2"
 REQUIREMENTS = Path(__file__).parent / "requirements.txt"
@@ -374,6 +394,7 @@ def _generate_verse(tokenizer, model, text: str, request_id: str) -> dict:
     timeout=600,
     gpu="T4",
     scaledown_window=300,
+    max_containers=MAX_GPU_CONTAINERS,
     secrets=[modal.Secret.from_name("huggingface-token")],
 )
 class MatchVerse:
