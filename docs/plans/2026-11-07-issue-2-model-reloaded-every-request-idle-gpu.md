@@ -13,7 +13,7 @@ Domain skills:
 1. The model is loaded once per container, not once per request. `match_verse` becomes a class `MatchVerse` declared with `@app.cls(image=image, gpu="T4", volumes={MODEL_DIR: model_volume}, timeout=600, scaledown_window=300, secrets=[huggingface-token])`. A `@modal.enter()` method checks the token, loads the tokenizer and the 4-bit model once, and logs one metadata line (`model loaded: load_time=<s>s`). A `@modal.method()` `match(self, text, request_id=None)` only builds the prompt, generates and parses. Proven by unit tests with fakes: across two or more `match` calls on one instance, `from_pretrained` runs once per loader and the load line is logged once; the method never calls `from_pretrained`. The live check (a second warm request shows no model-load log lines) is deferred: no Modal credentials (see Proof).
 2. The HTTP endpoint function `verse_api` requests no GPU, and its image is a lightweight image built from a second pinned lock (`requirements-api.in` compiled to `requirements-api.txt`) that holds FastAPI and pydantic and no torch, transformers, accelerate or bitsandbytes. Versions in the API lock equal the same packages in `requirements.txt`.
 3. Warm-request latency: deferred, no Modal credentials on this machine. The PR records "deferred: no Modal credentials" with the exact test-app commands to measure it.
-4. The endpoint awaits the GPU call asynchronously and does not block the event loop: `handle_verse_request` is `async` and awaits `match(...)`, and `verse_api` passes `MatchVerse().match.remote.aio`. Proven by a test where two concurrent `verse_api` calls both reach the fake `aio` call before either returns, and the blocking `.remote` is never called.
+4. The endpoint awaits the GPU call asynchronously and does not block the event loop: `handle_verse_request` is `async` and awaits `match(...)`, and `verse_api` passes `MatchVerse().match.remote.aio`. `verse_api` is declared with `@modal.concurrent(max_inputs=20)`, so one CPU container serves up to 20 requests at once while they await GPU calls; `MatchVerse` stays one input per container. Proven by a test where two concurrent `verse_api` calls both reach the fake `aio` call before either returns, and the blocking `.remote` is never called, and by a test that `verse_api`'s decorators are `@app.function`, `@modal.concurrent(max_inputs=20)`, `@modal.fastapi_endpoint` in that order, with no `@modal.concurrent` on `MatchVerse`.
 5. Requests whose `text` is longer than `MAX_TEXT_LENGTH = 4000` characters (`len(text)`) are rejected with `422` before any GPU work. The body follows the #3 contract: exactly `{"error": ERROR_TEXT_TOO_LONG, "id": <32 hex>}` with `ERROR_TEXT_TOO_LONG = "The 'text' field must be at most 4000 characters."` (the message is built from the constant). The text is never echoed back and not logged by default; the log line is `rejected: status=422 reason=text_too_long input_length=<n>`. Exactly 4000 characters is accepted. The empty-text check runs first, so a whitespace-only text of any length stays the empty-text `422`.
 6. All #3 and #5 behavior is kept: the `200`, `422`, `502` and `500` bodies; metadata-only logging; `WWJD_LOG_FULL_TEXT`; the request id passed as `request_id` and normalized in the GPU method; `_run_guarded` and `MatchVerseError` around generation, so exception text from generation never leaves the GPU container. Existing tests keep every assertion; only call shapes change (see Files that change).
 7. The `WWJD_APP_NAME` and `WWJD_HF_CACHE_VOLUME` overrides keep working, and `WWJD_LOG_FULL_TEXT=1` is copied into both images' env.
@@ -100,6 +100,7 @@ async def handle_verse_request(text, match) -> tuple[int, dict]:
     ... as now, but: result = await match(text, request_id=request_id) ...
 
 @app.function(image=api_image, timeout=600)
+@modal.concurrent(max_inputs=20)
 @modal.fastapi_endpoint(method="POST", docs=True)
 async def verse_api(body: VerseRequest):
     from fastapi.responses import JSONResponse
@@ -109,13 +110,15 @@ async def verse_api(body: VerseRequest):
 
 Why the length check is in `handle_verse_request` and not `Field(max_length=...)` on `VerseRequest`: FastAPI's default validation `422` is `{"detail": [...]}` and includes the submitted `input`, which would echo the text back, and `@modal.fastapi_endpoint` gives no FastAPI app to register a custom handler on. The handler check is simple, keeps the `{"error","id"}` contract and never echoes the text. `VerseRequest` stays `text: str`.
 
+Why `@modal.concurrent(max_inputs=20)` (added in review, approved by the coordinator): without it each Modal container runs one input at a time, so the async `.remote.aio` call would give no throughput; with it one CPU container awaits many GPU calls. `@app.function` must stay outermost (Modal raises if `concurrent` is stacked above it). 20 because the CPU container only awaits, so it is cheap to share, and 20 bounds the in-flight GPU calls a single API container can hold. `MatchVerse` stays one input per container.
+
 Why 4000: a browser selection the extension sends is a statement, usually one to a few paragraphs (a tweet is 280 characters, a long paragraph about 1000 to 1500). 4000 characters (about 1000 Mistral tokens) covers several paragraphs while bounding prompt size and generation cost on a T4.
 
 ## Files that change
 
-- `wwjd_bot_modal.py`: `api_image`, `API_REQUIREMENTS`, `_load_model`, `_generate_verse` signature, `MatchVerse` class replacing `match_verse`, async `handle_verse_request` with the length check, `MAX_TEXT_LENGTH`, `ERROR_TEXT_TOO_LONG`, `verse_api` with no GPU on `api_image` awaiting `.remote.aio`.
+- `wwjd_bot_modal.py`: `api_image`, `API_REQUIREMENTS`, `_load_model`, `_generate_verse` signature, `MatchVerse` class replacing `match_verse`, async `handle_verse_request` with the length check, `MAX_TEXT_LENGTH`, `ERROR_TEXT_TOO_LONG`, `verse_api` with no GPU on `api_image`, `@modal.concurrent(max_inputs=20)`, awaiting `.remote.aio`.
 - `requirements-api.in`, `requirements-api.txt`: new.
-- `tests/test_load_once.py` (new): load once per container, no GPU on the endpoint, API image and lock, async non-blocking call, max length.
+- `tests/test_load_once.py` (new): load once per container, no GPU on the endpoint, API image and lock, async non-blocking call, input concurrency of 20 on `verse_api`, max length.
 - Existing tests, call shapes only, no assertion weakened, no test removed:
   - every `handle_verse_request(...)` call becomes `asyncio.run(app_module.handle_verse_request(...))` (or a small local helper doing that), and the fakes become awaitable (`async def __call__` on `_Match`; lambdas become small `async def` functions) in `tests/test_verse_api.py`, `tests/test_logging.py`, `tests/test_logging_review_fixes.py`, `tests/test_parse_review_fixes.py`, `tests/test_parse_review_fixes_4.py`, `tests/test_parse_review_fixes_6.py`;
   - `tests/test_verse_api.py::test_verse_api_wrapper_returns_json_response`: monkeypatch `MatchVerse` so `MatchVerse().match.remote.aio` is the async fake, and `.remote` itself fails the test if called;
@@ -140,7 +143,7 @@ Why 4000: a browser selection the extension sends is a statement, usually one to
 - The API image must still import `wwjd_bot_modal` at container start: the module top level imports only stdlib, `modal` and `pydantic`, and `REQUIREMENTS` path computation is harmless. torch and transformers stay imported inside functions only.
 - Dropping `match_verse` breaks anyone calling it by name (`modal run`, other apps); none known in this repo.
 - An enter-hook failure now fails the container rather than the single call; Modal retries container start for later calls, and each failing call gets the generic `500`.
-- Chosen not to do: memory snapshots, `max_containers` or concurrency limits, serving FastAPI from the GPU class, a request body size limit (the body is parsed before the length check; the API container is CPU only, so this is not GPU work).
+- Chosen not to do: memory snapshots, `max_containers`, serving FastAPI from the GPU class, a request body size limit (the body is parsed before the length check; the API container is CPU only, so this is not GPU work). Input concurrency on the CPU endpoint is now done (`@modal.concurrent(max_inputs=20)`); the GPU class stays one input per container.
 
 ## Proof
 

@@ -19,7 +19,9 @@ app serving `mistralai/Mistral-7B-Instruct-v0.2` on a GPU.
    no GPU and runs on a light image (`api_image`) built from `requirements-api.txt`, which has
    FastAPI and pydantic but no torch, transformers, accelerate or bitsandbytes. It validates
    the body, awaits `MatchVerse().match.remote.aio(...)` without blocking its event loop, and
-   maps the result to a status code (see API contract).
+   maps the result to a status code (see API contract). `@modal.concurrent(max_inputs=20)`
+   lets one CPU container serve up to 20 requests at once while they wait on the GPU;
+   each `MatchVerse` container still runs one input at a time.
 3. **`MatchVerse`** (in `wwjd_bot_modal.py`). A GPU class (`@app.cls`, T4). Its
    `@modal.enter()` hook `load` runs once when a container starts: it checks the token and
    loads the tokenizer and the model in 4-bit from the Hugging Face cache Volume. Its

@@ -443,7 +443,11 @@ async def handle_verse_request(text, match) -> tuple[int, dict]:
 
 
 # No GPU: this container only validates, awaits MatchVerse and maps the result.
+# Up to 20 requests share one container while they wait on GPU calls; each
+# MatchVerse container still runs one input at a time. app.function must stay
+# outermost: Modal raises if concurrent is stacked above it.
 @app.function(image=api_image, timeout=600)
+@modal.concurrent(max_inputs=20)
 @modal.fastapi_endpoint(method="POST", docs=True)
 async def verse_api(body: VerseRequest):
     from fastapi.responses import JSONResponse
