@@ -552,16 +552,19 @@ def _parse_verse_request(raw: bytes) -> VerseRequest:
     parameter (fastapi/routing.py), raising the same exceptions so FastAPI's
     own handlers render the same responses:
 
-    - an empty body: RequestValidationError with FastAPI's missing-body error
-      (422 {"detail": [...]});
+    - an empty body, or the JSON value null: RequestValidationError with
+      FastAPI's missing-body error (422 {"detail": [...]});
     - invalid JSON (including a whitespace-only body): RequestValidationError
       with FastAPI's json_invalid error, whose input is {} rather than the body;
     - any other failure to decode (invalid UTF-8, nesting too deep, an integer
       over Python's digit limit): HTTPException 400 with FastAPI's fixed detail;
     - a decoded value that does not fit {"text": str}: RequestValidationError
-      with pydantic's errors, loc prefixed by "body"."""
+      with pydantic's errors (validated with from_attributes=True, as FastAPI
+      does, so a non-object value is model_attributes_type), loc prefixed by
+      "body"."""
+    missing = [{"type": "missing", "loc": ("body",), "msg": "Field required", "input": None}]
     if raw == b"":
-        errors = [{"type": "missing", "loc": ("body",), "msg": "Field required", "input": None}]
+        errors = missing
     else:
         try:
             data = json.loads(raw)
@@ -572,11 +575,16 @@ def _parse_verse_request(raw: bytes) -> VerseRequest:
 
             raise HTTPException(status_code=400, detail=ERROR_BODY_UNPARSEABLE) from None
         else:
-            # Outside the broad except: pydantic's ValidationError is a ValueError.
-            try:
-                return VerseRequest.model_validate(data)
-            except ValidationError as e:
-                errors = [{**error, "loc": ("body", *error["loc"])} for error in e.errors(include_url=False)]
+            if data is None:
+                # FastAPI treats a JSON null body as a missing body.
+                errors = missing
+            else:
+                # Outside the broad except: pydantic's ValidationError is a
+                # ValueError. FastAPI validates with from_attributes=True.
+                try:
+                    return VerseRequest.model_validate(data, from_attributes=True)
+                except ValidationError as e:
+                    errors = [{**error, "loc": ("body", *error["loc"])} for error in e.errors(include_url=False)]
     from fastapi.exceptions import RequestValidationError
 
     raise RequestValidationError(errors)
