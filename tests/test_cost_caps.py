@@ -291,6 +291,13 @@ class _RequestValidationError(Exception):
         return self._errors
 
 
+class _HTTPException(Exception):
+    def __init__(self, status_code, detail=None):
+        super().__init__(status_code, detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
 @pytest.fixture
 def stub_fastapi(monkeypatch):
     responses = types.ModuleType("fastapi.responses")
@@ -300,6 +307,7 @@ def stub_fastapi(monkeypatch):
     fastapi = types.ModuleType("fastapi")
     fastapi.responses = responses
     fastapi.exceptions = exceptions
+    fastapi.HTTPException = _HTTPException
     monkeypatch.setitem(sys.modules, "fastapi", fastapi)
     monkeypatch.setitem(sys.modules, "fastapi.responses", responses)
     monkeypatch.setitem(sys.modules, "fastapi.exceptions", exceptions)
@@ -441,4 +449,41 @@ def test_verse_api_over_long_text_is_still_the_4000_character_422(app_module, st
     response = _verse_api(app_module, _FakeRequest(json.dumps({"text": "a" * 4001}).encode()))
     assert response.status_code == 422
     assert response.content["error"] == app_module.ERROR_TEXT_TOO_LONG
+    assert gpu.calls == []
+
+
+# Review fixes: bodies FastAPI could not decode (400) and the empty body
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(b"[" * 20000, id="nesting_too_deep"),
+        pytest.param(b'{"text": ' + b"1" * 5000 + b"}", id="integer_over_digit_limit"),
+        pytest.param(b'{"text": "\xff"}', id="invalid_utf8"),
+    ],
+)
+def test_verse_api_undecodable_body_is_fastapis_400(app_module, stub_fastapi, gpu, raw):
+    with pytest.raises(_HTTPException) as info:
+        _verse_api(app_module, _FakeRequest(raw))
+    assert info.value.status_code == 400
+    assert info.value.detail == "There was an error parsing the body"
+    assert info.value.__cause__ is None
+    assert gpu.calls == []
+
+
+def test_verse_api_empty_body_is_fastapis_missing_body_error(app_module, stub_fastapi, gpu):
+    with pytest.raises(_RequestValidationError) as info:
+        _verse_api(app_module, _FakeRequest(b""))
+    assert info.value.errors() == [
+        {"type": "missing", "loc": ("body",), "msg": "Field required", "input": None}
+    ]
+    assert gpu.calls == []
+
+
+def test_verse_api_whitespace_only_body_is_json_invalid(app_module, stub_fastapi, gpu):
+    with pytest.raises(_RequestValidationError) as info:
+        _verse_api(app_module, _FakeRequest(b"   "))
+    errors = info.value.errors()
+    assert [(e["type"], tuple(e["loc"]), e["input"]) for e in errors] == [("json_invalid", ("body", 3), {})]
     assert gpu.calls == []
