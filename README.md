@@ -123,9 +123,9 @@ Request: `POST` with a JSON body `{"text": "<statement>"}`.
 | `verse_api` itself runs past its `timeout=600` (possible on a cold start: the wait includes starting the T4 container for `match_verse` and downloading and loading the model) | Modal's timeout error | Modal's own error response, not a body from this code |
 
 The error messages are fixed strings and never contain exception text or model output.
-`id` is a random 32 character hex correlation id. The same id appears in every log line for
-the request, from both `verse_api` and `match_verse`, so a reported `id` finds the matching
-Modal log lines (see Logging and data handling).
+`id` is a random 32 character hex correlation id. Every log record this code writes for the
+request starts with `[<id>]`, in both containers, so a reported `id` finds the matching Modal
+log lines (see Logging and data handling).
 
 The `303` comes from Modal, not from this code: every Modal web endpoint has a 150 second
 HTTP request limit, and a longer request is redirected to a result URL that can be reloaded
@@ -179,8 +179,11 @@ By default each request logs metadata only:
   frames as file, line and function name only. Exception messages, source lines and local
   variables are not logged, because a message can contain the input.
 
-The user text, the prompt and the model output are never logged by default, and no exception
-text or model output is ever returned in a response body, whatever the setting.
+The user text, the prompt and the model output are never logged by default. The bodies this
+code builds (`422` for empty text, `500`, `502`) never hold exception text or model output,
+whatever the setting. FastAPI's own validation `422` (for a body that does not fit
+`{"text": str}`) can repeat the submitted body back to the same client; this code does not log
+it.
 
 For debugging, set `WWJD_LOG_FULL_TEXT=1` in the shell that runs `modal serve` or
 `modal deploy`. It is copied into the image env, so both containers log the full user text,
@@ -192,7 +195,8 @@ WWJD_LOG_FULL_TEXT=1 modal serve wwjd_bot_modal.py
 ```
 
 Only the exact value `1` turns it on; any other value, or unset, means off. It is off by
-default. Redeploy without it as soon as you are done, since those logs then hold user text.
+default. While it is on, importing the app logs a `WARNING` saying so, which also shows at a
+later `modal deploy` from the same shell. Redeploy without it as soon as you are done, since those logs then hold user text.
 
 ## Development
 
