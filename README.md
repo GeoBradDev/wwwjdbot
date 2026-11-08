@@ -123,8 +123,9 @@ Request: `POST` with a JSON body `{"text": "<statement>"}`.
 | `verse_api` itself runs past its `timeout=600` (possible on a cold start: the wait includes starting the T4 container for `match_verse` and downloading and loading the model) | Modal's timeout error | Modal's own error response, not a body from this code |
 
 The error messages are fixed strings and never contain exception text or model output.
-`id` is a random 32 character hex correlation id; the same id is printed in the Modal logs
-for `500` and `502` responses.
+`id` is a random 32 character hex correlation id. Every log record this code writes for the
+request starts with `[<id>]`, in both containers, so a reported `id` finds the matching Modal
+log lines (see Logging and data handling).
 
 The `303` comes from Modal, not from this code: every Modal web endpoint has a 150 second
 HTTP request limit, and a longer request is redirected to a result URL that can be reloaded
@@ -160,6 +161,43 @@ whitespace; there is no empty success. The rules, from `parse_model_output`:
   a `502` (`"explanation": "C" I hope this helps`).
 - If the fallback does not find all three as non-empty strings, `match_verse` returns
   `{"error": "parse_failed", "raw_output": ...}` and `verse_api` responds `502`.
+
+## Logging and data handling
+
+The selected text a user sends can be personal or sensitive, so by default it is not logged.
+All logging goes through the `wwjd_bot` logger at `INFO` and above, written to stderr, where
+Modal keeps it with the app's logs.
+
+By default each request logs metadata only:
+
+- the request id (the `id` returned in the empty-text `422`, `500` and `502` bodies);
+- the input length, or for an empty-text `422` only the reason `empty_text`;
+- from `match_verse`: the input and output lengths, the generation time and whether the output parsed;
+- the outcome status, and for a `502` one fixed reason: `not_dict`, `match_error` or
+  `invalid_fields`;
+- for an exception: the exception type names (including chained causes) and the traceback
+  frames as file, line and function name only. Exception messages, source lines and local
+  variables are not logged, because a message can contain the input.
+
+The user text, the prompt and the model output are never logged by default. The bodies this
+code builds (`422` for empty text, `500`, `502`) never hold exception text or model output,
+whatever the setting. FastAPI's own validation `422` (for a body that does not fit
+`{"text": str}`) can repeat the submitted body back to the same client; this code does not log
+it.
+
+For debugging, set `WWJD_LOG_FULL_TEXT=1` in the shell that runs `modal serve` or
+`modal deploy`. It is copied into the image env, so both containers log the full user text,
+the full prompt, the model output (including the raw output behind a `502`) and full
+exception tracebacks with messages:
+
+```sh
+WWJD_LOG_FULL_TEXT=1 modal serve wwjd_bot_modal.py
+```
+
+Only the exact value `1` turns it on; any other value, or unset, means off. It is off by
+default. While it is on, importing the app logs a `WARNING` saying so, so a flag left
+exported in the shell is visible at the next `modal deploy`. Redeploy without it as soon as you
+are done, since those logs then hold user text.
 
 ## Development
 

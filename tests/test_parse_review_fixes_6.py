@@ -42,7 +42,7 @@ def test_value_spanning_an_ignored_object_is_parse_failure(app_module, generated
 @pytest.mark.parametrize("generated", SPANS_THE_CUT)
 def test_value_spanning_an_ignored_object_is_502(app_module, generated):
     status, body = app_module.handle_verse_request(
-        "Some statement", lambda text: _parse(app_module, generated)
+        "Some statement", lambda text, request_id=None: _parse(app_module, generated)
     )
     assert status == 502
     assert body["error"] == app_module.ERROR_UNPARSEABLE

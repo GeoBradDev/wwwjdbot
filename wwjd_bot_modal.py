@@ -1,7 +1,9 @@
 import json
+import logging
 import os
 import re
 import time
+import traceback
 import uuid
 from pathlib import Path
 
@@ -9,6 +11,35 @@ import modal
 from pydantic import BaseModel
 
 app = modal.App(os.environ.get("WWJD_APP_NAME", "wwjd-bot"))
+
+LOG_FULL_TEXT_ENV = "WWJD_LOG_FULL_TEXT"
+logger = logging.getLogger("wwjd_bot")
+
+
+def _configure_logger() -> None:
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
+
+def _log_full_text() -> bool:
+    # Read at every call. Off unless the value is exactly "1".
+    return os.environ.get(LOG_FULL_TEXT_ENV) == "1"
+
+
+_configure_logger()
+if _log_full_text():
+    # Visible at a later modal deploy from a shell where the flag was exported.
+    logger.warning(
+        "%s=1: full text logging is on; user text, prompts, model output and exception messages will be logged",
+        LOG_FULL_TEXT_ENV,
+    )
+
+
+def _full_text_image_env() -> dict:
+    return {LOG_FULL_TEXT_ENV: "1"} if _log_full_text() else {}
 
 MODEL_DIR = "/root/.cache/huggingface"
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.2"
@@ -20,6 +51,10 @@ image = (
     .uv_pip_install(requirements=[str(REQUIREMENTS)], uv_version="0.10.3")
     .env({"HF_HOME": MODEL_DIR})
 )
+# WWJD_LOG_FULL_TEXT=1 in the shell that runs modal serve/deploy turns full
+# text logging on in both containers; by default the image is unchanged.
+if _full_text_image_env():
+    image = image.env(_full_text_image_env())
 
 # Use a persistent volume to cache Hugging Face models
 model_volume = modal.Volume.from_name(
@@ -30,6 +65,49 @@ model_volume = modal.Volume.from_name(
 
 class VerseRequest(BaseModel):
     text: str
+
+
+_REQUEST_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def _normalize_request_id(request_id) -> str:
+    if isinstance(request_id, str) and _REQUEST_ID.fullmatch(request_id):
+        return request_id
+    return uuid.uuid4().hex
+
+
+def _exception_types(exc: BaseException) -> str:
+    # Type names of exc and its chained causes/contexts, outermost first, cycle safe.
+    names, seen = [], set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        names.append(f"{type(exc).__module__}.{type(exc).__qualname__}")
+        exc = exc.__cause__ or exc.__context__
+    return " <- ".join(names)
+
+
+def _traceback_frames(exc: BaseException) -> str:
+    # File, line and function only: no source lines, messages or locals.
+    return "\n".join(
+        f'  File "{frame.filename}", line {frame.lineno}, in {frame.name}'
+        for frame in traceback.extract_tb(exc.__traceback__)
+    )
+
+
+def _log_exception(request_id: str, where: str, exc: BaseException) -> None:
+    # Exception messages can embed the user text, so by default only type
+    # names and code locations are logged.
+    if _log_full_text():
+        logger.error("[%s] %s failed", request_id, where, exc_info=exc)
+        return
+    logger.error(
+        "[%s] %s failed: %s (message withheld; set %s=1 to log it)\nTraceback (most recent call last):\n%s",
+        request_id,
+        where,
+        _exception_types(exc),
+        LOG_FULL_TEXT_ENV,
+        _traceback_frames(exc),
+    )
 
 
 def build_prompt(text: str) -> str:
@@ -200,21 +278,40 @@ def parse_model_output(generated_text: str, model_name: str, elapsed_time: float
     }
 
 
-@app.function(
-    image=image,
-    volumes={MODEL_DIR: model_volume},
-    timeout=600,
-    gpu="T4",
-    secrets=[modal.Secret.from_name("huggingface-token")]
-)
-def match_verse(text: str):
+class MatchVerseError(RuntimeError):
+    """Raised by match_verse in place of any failure after the token check; carries only the request id."""
+
+
+def _run_guarded(request_id: str, func, *args):
+    try:
+        return func(*args)
+    except Exception as e:  # noqa: BLE001 log safely, then re-raise without the message
+        _log_exception(request_id, "match_verse", e)
+    # Raised outside the except block, so it has no __cause__ or __context__.
+    raise MatchVerseError(f"match_verse failed for request {request_id}")
+
+
+def _log_generation(request_id, text, prompt, generated_text, elapsed_time, model_name) -> dict:
+    result = parse_model_output(generated_text, model_name, elapsed_time)
+    logger.info(
+        "[%s] generated: input_length=%d output_length=%d generation_time=%.2fs parse=%s",
+        request_id,
+        len(text),
+        len(generated_text),
+        elapsed_time,
+        "parse_failed" if "error" in result else "ok",
+    )
+    if _log_full_text():
+        logger.info("[%s] prompt sent:\n%s", request_id, prompt)
+        logger.info("[%s] model output:\n%s", request_id, generated_text)
+    return result
+
+
+def _generate_verse(text: str, request_id: str, token: str) -> dict:
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
     model_name = MODEL_NAME
-    token = os.environ.get("HUGGINGFACE_TOKEN")
-    if not token:
-        raise RuntimeError("HUGGINGFACE_TOKEN is not set; attach the huggingface-token Modal Secret")
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -257,13 +354,23 @@ def match_verse(text: str):
     generated_text = tokenizer.decode(output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
     elapsed_time = time.time() - start_time
 
-    print("=== Prompt Sent ===")
-    print(prompt)
-    print("=== Model Output ===")
-    print(generated_text)
-    print(f"Response generated in {elapsed_time:.2f} seconds")
+    return _log_generation(request_id, text, prompt, generated_text, elapsed_time, model_name)
 
-    return parse_model_output(generated_text, model_name, elapsed_time)
+
+@app.function(
+    image=image,
+    volumes={MODEL_DIR: model_volume},
+    timeout=600,
+    gpu="T4",
+    secrets=[modal.Secret.from_name("huggingface-token")]
+)
+def match_verse(text: str, request_id: str | None = None):
+    request_id = _normalize_request_id(request_id)
+    # Checked before the guard: this fixed message holds no user text.
+    token = os.environ.get("HUGGINGFACE_TOKEN")
+    if not token:
+        raise RuntimeError("HUGGINGFACE_TOKEN is not set; attach the huggingface-token Modal Secret")
+    return _run_guarded(request_id, _generate_verse, text, request_id, token)
 
 
 ERROR_EMPTY_TEXT = "The 'text' field must be a non-empty string."
@@ -275,24 +382,33 @@ def handle_verse_request(text, match) -> tuple[int, dict]:
     request_id = uuid.uuid4().hex
 
     if not isinstance(text, str) or not text.strip():
+        logger.info("[%s] rejected: status=422 reason=empty_text", request_id)
         return 422, {"error": ERROR_EMPTY_TEXT, "id": request_id}
 
+    logger.info("[%s] request: input_length=%d", request_id, len(text))
+    if _log_full_text():
+        logger.info("[%s] input text: %r", request_id, text)
+
     try:
-        result = match(text)
+        result = match(text, request_id=request_id)
     except Exception as e:  # noqa: BLE001 any failure becomes a generic 500
-        print(f"[{request_id}] match_verse failed: {type(e).__name__}: {e}")
+        _log_exception(request_id, "match_verse call", e)
+        logger.info("[%s] done: status=500", request_id)
         return 500, {"error": ERROR_INTERNAL, "id": request_id}
 
     if not isinstance(result, dict):
-        reason = f"result is {type(result).__name__}, not dict"
+        reason = "not_dict"
     elif "error" in result:
-        reason = f"match_verse returned error {result['error']!r}"
+        reason = "match_error"
     else:
         fields = _non_empty_strings(result)
         if fields:
+            logger.info("[%s] done: status=200", request_id)
             return 200, {"raw": fields}
-        reason = "a field is missing, empty or not a string"
-    print(f"[{request_id}] unparseable model output: {reason}")
+        reason = "invalid_fields"
+    logger.warning("[%s] unparseable model output: status=502 reason=%s", request_id, reason)
+    if _log_full_text() and isinstance(result, dict) and isinstance(result.get("raw_output"), str):
+        logger.info("[%s] raw model output: %r", request_id, result["raw_output"])
     return 502, {"error": ERROR_UNPARSEABLE, "id": request_id}
 
 
