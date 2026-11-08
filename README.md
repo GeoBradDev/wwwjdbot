@@ -17,7 +17,8 @@ app serving `mistralai/Mistral-7B-Instruct-v0.2` on a GPU.
 2. **`verse_api`** (in `wwjd_bot_modal.py`). A FastAPI web endpoint
    (`@modal.fastapi_endpoint(method="POST", docs=True)`) on a CPU-only container: it requests
    no GPU and runs on a light image (`api_image`) built from `requirements-api.txt`, which has
-   FastAPI and pydantic but no torch, transformers, accelerate or bitsandbytes. It validates
+   `fastapi[standard]` (with its extras, such as uvicorn) and pydantic but no torch,
+   transformers, accelerate or bitsandbytes. It validates
    the body, awaits `MatchVerse().match.remote.aio(...)` without blocking its event loop, and
    maps the result to a status code (see API contract). `@modal.concurrent(max_inputs=20)`
    lets one CPU container serve up to 20 requests at once while they wait on the GPU;
@@ -45,7 +46,11 @@ the container automatically, so the helpers stay in it rather than a separate mo
   permission.
 - A Modal Secret named `huggingface-token` that holds the env var `HUGGINGFACE_TOKEN`.
   The `MatchVerse` enter hook raises an error if the token is missing, so the container
-  fails to start and the request gets the generic `500`.
+  fails to start. Modal reports an enter-hook failure as a task failure and shuts the
+  container down; the waiting call fails only once Modal escalates the crash loop to input
+  failures, which Modal's server decides. The call eventually fails and the client gets the
+  generic `500`, but a `303` can come first, and if the escalation takes longer than
+  `verse_api`'s `timeout=600` the client gets Modal's timeout response instead.
 - A Modal Volume named `huggingface-cache` for the model weights. It is created on the first
   deploy (`create_if_missing=True`), so creating it by hand is optional.
 
@@ -137,7 +142,7 @@ Request: `POST` with a JSON body `{"text": "<statement>"}`.
 | `text` is longer than 4000 characters (`MAX_TEXT_LENGTH`, counted with `len(text)`; whitespace-only text of any length is the empty-text case above) | `422` | `{"error": "The 'text' field must be at most 4000 characters.", "id": "<id>"}`, returned before any GPU work; the text is not echoed back |
 | `text` key missing, or the body is not valid for `{"text": str}` | `422` | FastAPI's default validation error (`{"detail": [...]}`) |
 | The model output cannot be parsed into three non-empty string fields, even by the fallback | `502` | `{"error": "The model returned a response that could not be parsed.", "id": "<id>"}` |
-| Any exception while calling `MatchVerse.match`, including a container that fails to start | `500` | `{"error": "Internal error while processing the request.", "id": "<id>"}` |
+| Any exception while calling `MatchVerse.match`, including a container whose enter hook fails (that call fails only once Modal escalates the crash loop to input failures, so a `303` can come first, or Modal's timeout response if escalation outlasts `timeout=600`) | `500` | `{"error": "Internal error while processing the request.", "id": "<id>"}` |
 | Request still running after 150 seconds (Modal web endpoint limit, likely on a cold start) | `303` | Redirect to a result URL; each fetch of it waits up to another 150 seconds and returns one of the other responses here, or another `303` if the request is still running |
 | `verse_api` itself runs past its `timeout=600` (possible on a cold start: the wait includes starting the T4 container for `MatchVerse` and downloading and loading the model; `MatchVerse` has its own `timeout=600`) | Modal's timeout error | Modal's own error response, not a body from this code |
 
