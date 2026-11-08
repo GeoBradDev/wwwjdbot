@@ -8,7 +8,15 @@ import uuid
 from pathlib import Path
 
 import modal
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
+
+try:
+    # FastAPI resolves verse_api's annotation from this module's globals and
+    # passes the raw request for starlette's Request. The API container has
+    # starlette (via fastapi); local tooling and CI do not, and never serve.
+    from starlette.requests import Request
+except ImportError:
+    Request = None
 
 app = modal.App(os.environ.get("WWJD_APP_NAME", "wwjd-bot"))
 
@@ -497,6 +505,64 @@ async def handle_verse_request(text, match) -> tuple[int, dict]:
     return 502, {"error": ERROR_UNPARSEABLE, "id": request_id}
 
 
+# A valid body is {"text": ...} with at most 4000 characters; the worst JSON
+# encoding of one character is a 12-byte surrogate pair escape, so 48,000
+# bytes plus framing. 64 KiB leaves room for whitespace.
+MAX_BODY_BYTES = 65536
+ERROR_BODY_TOO_LARGE = f"The request body must be at most {MAX_BODY_BYTES} bytes."
+_CONTENT_LENGTH = re.compile(r"[0-9]+")
+
+
+async def read_limited_body(headers, chunks, max_bytes: int) -> tuple[bytes | None, str]:
+    """Return (body, "") when the body is at most max_bytes, else (None, measure).
+
+    A Content-Length above the cap rejects without reading (measure
+    "content_length=<n>"). Otherwise chunks are read until the running total
+    exceeds the cap, and nothing after that chunk is read (measure
+    "bytes_read=<n>"), so a missing or lying Content-Length is still bounded."""
+    declared = (headers.get("content-length") or "").strip()
+    if _CONTENT_LENGTH.fullmatch(declared) and int(declared) > max_bytes:
+        return None, f"content_length={int(declared)}"
+    parts, total = [], 0
+    async for chunk in chunks:
+        total += len(chunk)
+        if total > max_bytes:
+            return None, f"bytes_read={total}"
+        parts.append(chunk)
+    return b"".join(parts), ""
+
+
+def _parse_verse_request(raw: bytes) -> VerseRequest:
+    """Validate raw as FastAPI does for a `body: VerseRequest` parameter, and
+    raise FastAPI's RequestValidationError with the same errors, so the client
+    gets the default 422 {"detail": [...]}. Invalid JSON gets FastAPI's own
+    json_invalid error, whose input is {} rather than the body."""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        errors = [_json_invalid(e.pos, e.msg)]
+    except UnicodeDecodeError as e:
+        errors = [_json_invalid(e.start, "invalid UTF-8")]
+    else:
+        try:
+            return VerseRequest.model_validate(data)
+        except ValidationError as e:
+            errors = [{**error, "loc": ("body", *error["loc"])} for error in e.errors(include_url=False)]
+    from fastapi.exceptions import RequestValidationError
+
+    raise RequestValidationError(errors)
+
+
+def _json_invalid(position: int, message: str) -> dict:
+    return {
+        "type": "json_invalid",
+        "loc": ("body", position),
+        "msg": "JSON decode error",
+        "input": {},
+        "ctx": {"error": message},
+    }
+
+
 # No GPU: this container only validates, awaits MatchVerse and maps the result.
 # Up to 20 requests share one container while they wait on GPU calls; each
 # MatchVerse container still runs one input at a time. app.function must stay
@@ -504,8 +570,15 @@ async def handle_verse_request(text, match) -> tuple[int, dict]:
 @app.function(image=api_image, timeout=600)
 @modal.concurrent(max_inputs=20)
 @modal.fastapi_endpoint(method="POST", docs=True)
-async def verse_api(body: VerseRequest):
+async def verse_api(request: Request):
     from fastapi.responses import JSONResponse
 
+    # The body is read by hand, with a byte cap, before any JSON parsing.
+    raw, measure = await read_limited_body(request.headers, request.stream(), MAX_BODY_BYTES)
+    if raw is None:
+        request_id = uuid.uuid4().hex
+        logger.info("[%s] rejected: status=413 reason=body_too_large %s", request_id, measure)
+        return JSONResponse(status_code=413, content={"error": ERROR_BODY_TOO_LARGE, "id": request_id})
+    body = _parse_verse_request(raw)
     status, payload = await handle_verse_request(body.text, MatchVerse().match.remote.aio)
     return JSONResponse(status_code=status, content=payload)

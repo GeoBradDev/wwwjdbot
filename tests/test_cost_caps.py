@@ -8,6 +8,8 @@ import ast
 import asyncio
 import contextlib
 import importlib
+import inspect
+import json
 import logging
 import re
 import sys
@@ -239,3 +241,200 @@ def test_other_match_errors_stay_502(app_module):
     status, body = asyncio.run(app_module.handle_verse_request("Some statement", match))
     assert status == 502
     assert body["error"] == app_module.ERROR_UNPARSEABLE
+
+
+# Criterion 3: request body byte cap
+
+
+class _Stream:
+    """Async iterable of chunks that records how many were read."""
+
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+        self.read = 0
+
+    def __aiter__(self):
+        return self._gen()
+
+    async def _gen(self):
+        for chunk in self.chunks:
+            self.read += 1
+            yield chunk
+
+
+class _FakeRequest:
+    def __init__(self, body=b"", headers=None, chunks=None):
+        self.headers = {"content-length": str(len(body))} if headers is None else headers
+        self._stream = _Stream(chunks if chunks is not None else [body, b""])
+
+    def stream(self):
+        return self._stream
+
+
+class _JSONResponse:
+    def __init__(self, status_code=200, content=None):
+        self.status_code = status_code
+        self.content = content
+
+
+class _RequestValidationError(Exception):
+    def __init__(self, errors, *, body=None):
+        super().__init__(errors)
+        self._errors = list(errors)
+        self.body = body
+
+    def errors(self):
+        return self._errors
+
+
+@pytest.fixture
+def stub_fastapi(monkeypatch):
+    responses = types.ModuleType("fastapi.responses")
+    responses.JSONResponse = _JSONResponse
+    exceptions = types.ModuleType("fastapi.exceptions")
+    exceptions.RequestValidationError = _RequestValidationError
+    fastapi = types.ModuleType("fastapi")
+    fastapi.responses = responses
+    fastapi.exceptions = exceptions
+    monkeypatch.setitem(sys.modules, "fastapi", fastapi)
+    monkeypatch.setitem(sys.modules, "fastapi.responses", responses)
+    monkeypatch.setitem(sys.modules, "fastapi.exceptions", exceptions)
+
+
+@pytest.fixture
+def gpu(app_module, monkeypatch):
+    match = _AsyncMatch(GOOD)
+
+    def _blocking_remote(*args, **kwargs):
+        raise AssertionError("the blocking .remote was called; use .remote.aio")
+
+    _blocking_remote.aio = match
+    method = types.SimpleNamespace(remote=_blocking_remote)
+    monkeypatch.setattr(app_module, "MatchVerse", lambda: types.SimpleNamespace(match=method))
+    return match
+
+
+def _raw_verse_api(app_module):
+    return inspect.unwrap(app_module.verse_api._raw_f_)
+
+
+def _read(app_module, request, max_bytes):
+    return asyncio.run(app_module.read_limited_body(request.headers, request.stream(), max_bytes))
+
+
+def test_body_cap_constants(app_module):
+    assert app_module.MAX_BODY_BYTES == 65536
+    assert app_module.ERROR_BODY_TOO_LARGE == "The request body must be at most 65536 bytes."
+
+
+def test_read_limited_body_rejects_a_large_content_length_without_reading(app_module):
+    request = _FakeRequest(headers={"content-length": "70000"}, chunks=[b"x" * 70000])
+    body, measure = _read(app_module, request, 65536)
+    assert body is None
+    assert measure == "content_length=70000"
+    assert request.stream().read == 0
+
+
+@pytest.mark.parametrize("headers", [{}, {"content-length": "10"}, {"content-length": "junk"}])
+def test_read_limited_body_stops_at_the_first_chunk_over_the_cap(app_module, headers):
+    chunks = [b"a" * 40000, b"b" * 40000, b"c" * 40000, b""]
+    request = _FakeRequest(headers=headers, chunks=chunks)
+    body, measure = _read(app_module, request, 65536)
+    assert body is None
+    assert measure == "bytes_read=80000"
+    assert request.stream().read == 2
+
+
+def test_read_limited_body_accepts_exactly_the_cap(app_module):
+    chunks = [b"a" * 30000, b"b" * 35536, b""]
+    request = _FakeRequest(headers={"content-length": "65536"}, chunks=chunks)
+    body, _ = _read(app_module, request, 65536)
+    assert body == b"a" * 30000 + b"b" * 35536
+
+
+def _verse_api(app_module, request):
+    return asyncio.run(_raw_verse_api(app_module)(request))
+
+
+def test_verse_api_takes_a_raw_request(app_module):
+    tree = ast.parse(APP_FILE.read_text())
+    func = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "verse_api")
+    assert [(a.arg, ast.unparse(a.annotation)) for a in func.args.args] == [("request", "Request")]
+    assert inspect.iscoroutinefunction(_raw_verse_api(app_module))
+
+
+def test_verse_api_413_on_large_content_length(app_module, stub_fastapi, gpu, caplog):
+    request = _FakeRequest(headers={"content-length": "70000"}, chunks=[b"x" * 70000])
+    response = _verse_api(app_module, request)
+    assert response.status_code == 413
+    assert set(response.content) == {"error", "id"}
+    assert response.content["error"] == app_module.ERROR_BODY_TOO_LARGE
+    assert ID_RE.fullmatch(response.content["id"])
+    assert request.stream().read == 0
+    assert gpu.calls == []
+    assert (
+        f"[{response.content['id']}] rejected: status=413 reason=body_too_large content_length=70000"
+        in caplog.text
+    )
+
+
+def test_verse_api_413_on_a_streamed_body_over_the_cap(app_module, stub_fastapi, gpu, caplog):
+    secret = b'{"text": "' + SENTINEL.encode() + b"x" * 70000 + b'"}'
+    chunks = [secret[:65000], secret[65000:66000], secret[66000:], b""]
+    request = _FakeRequest(headers={}, chunks=chunks)
+    response = _verse_api(app_module, request)
+    assert response.status_code == 413
+    assert response.content["error"] == app_module.ERROR_BODY_TOO_LARGE
+    assert request.stream().read == 2
+    assert gpu.calls == []
+    assert f"[{response.content['id']}] rejected: status=413 reason=body_too_large bytes_read=66000" in caplog.text
+    assert SENTINEL not in caplog.text
+
+
+def test_verse_api_accepts_a_body_of_exactly_the_cap(app_module, stub_fastapi, gpu):
+    raw = b'{"text": "' + b"a" * 100 + b'"}' + b" " * (65536 - 112)
+    assert len(raw) == 65536
+    response = _verse_api(app_module, _FakeRequest(raw))
+    assert response.status_code == 200
+    assert response.content == GOOD_RAW
+    assert gpu.calls == ["a" * 100]
+
+
+def test_verse_api_valid_body_awaits_remote_aio(app_module, stub_fastapi, gpu):
+    response = _verse_api(app_module, _FakeRequest(json.dumps({"text": "Some statement"}).encode()))
+    assert response.status_code == 200
+    assert response.content == GOOD_RAW
+    assert gpu.calls == ["Some statement"]
+
+
+def test_verse_api_invalid_json_is_fastapis_validation_error(app_module, stub_fastapi, gpu):
+    with pytest.raises(_RequestValidationError) as info:
+        _verse_api(app_module, _FakeRequest(b'{"text": "unterminated'))
+    errors = info.value.errors()
+    assert len(errors) == 1
+    assert errors[0]["type"] == "json_invalid"
+    assert errors[0]["loc"][0] == "body"
+    assert errors[0]["input"] == {}
+    assert gpu.calls == []
+
+
+@pytest.mark.parametrize(
+    ("raw", "loc", "error_type"),
+    [(b"{}", ("body", "text"), "missing"), (b'{"text": 5}', ("body", "text"), "string_type")],
+)
+def test_verse_api_invalid_body_is_fastapis_validation_error(
+    app_module, stub_fastapi, gpu, raw, loc, error_type
+):
+    with pytest.raises(_RequestValidationError) as info:
+        _verse_api(app_module, _FakeRequest(raw))
+    errors = info.value.errors()
+    assert [(tuple(e["loc"]), e["type"]) for e in errors] == [(loc, error_type)]
+    assert "url" not in errors[0]
+    assert gpu.calls == []
+
+
+def test_verse_api_over_long_text_is_still_the_4000_character_422(app_module, stub_fastapi, gpu):
+    response = _verse_api(app_module, _FakeRequest(json.dumps({"text": "a" * 4001}).encode()))
+    assert response.status_code == 422
+    assert response.content["error"] == app_module.ERROR_TEXT_TOO_LONG
+    assert gpu.calls == []
