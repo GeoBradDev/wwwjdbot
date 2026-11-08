@@ -243,15 +243,15 @@ CI (`.github/workflows/ci.yml`) runs the same three checks on every push and pul
 
 - `requirements.in`: top-level dependencies of the GPU image (`MatchVerse`).
 - `requirements.txt`: the compiled, fully pinned lock that the GPU image installs. Do not edit it
-  by hand. Regenerate it after changing `requirements.in` with the command below. This step
-  alone needs [`uv`](https://docs.astral.sh/uv/) installed; nothing else in this README does.
+  by hand. Regenerate it after changing `requirements.in` with the command below. The two lock
+  compile steps alone need [`uv`](https://docs.astral.sh/uv/) installed; nothing else in this README does.
 
   ```sh
   uv pip compile requirements.in -o requirements.txt --python-version 3.12 --python-platform x86_64-manylinux_2_28
   ```
 
-- `requirements-api.in`: top-level dependencies of the CPU image for `verse_api` (fastapi and
-  pydantic only, at the same versions as the GPU lock).
+- `requirements-api.in`: top-level dependencies of the CPU image for `verse_api` (`fastapi[standard]`
+  and pydantic, at the same versions as the GPU lock).
 - `requirements-api.txt`: its compiled lock. Do not edit it by hand. It is compiled with
   `-c requirements.txt` so every shared package has the same version in both containers;
   recompile it after changing `requirements-api.in` or `requirements.txt`:
