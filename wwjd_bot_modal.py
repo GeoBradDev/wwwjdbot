@@ -24,12 +24,18 @@ def _configure_logger() -> None:
     logger.setLevel(logging.INFO)
 
 
-_configure_logger()
-
-
 def _log_full_text() -> bool:
     # Read at every call. Off unless the value is exactly "1".
     return os.environ.get(LOG_FULL_TEXT_ENV) == "1"
+
+
+_configure_logger()
+if _log_full_text():
+    # Visible at a later modal deploy from a shell where the flag was exported.
+    logger.warning(
+        "%s=1: full text logging is on; user text, prompts, model output and exception messages will be logged",
+        LOG_FULL_TEXT_ENV,
+    )
 
 
 def _full_text_image_env() -> dict:
@@ -273,7 +279,7 @@ def parse_model_output(generated_text: str, model_name: str, elapsed_time: float
 
 
 class MatchVerseError(RuntimeError):
-    """Raised by match_verse in place of any failure; carries only the request id."""
+    """Raised by match_verse in place of any failure after the token check; carries only the request id."""
 
 
 def _run_guarded(request_id: str, func, *args):
@@ -386,7 +392,8 @@ def handle_verse_request(text, match) -> tuple[int, dict]:
     try:
         result = match(text, request_id=request_id)
     except Exception as e:  # noqa: BLE001 any failure becomes a generic 500
-        _log_exception(request_id, "match_verse", e)
+        _log_exception(request_id, "match_verse call", e)
+        logger.info("[%s] done: status=500", request_id)
         return 500, {"error": ERROR_INTERNAL, "id": request_id}
 
     if not isinstance(result, dict):
