@@ -34,7 +34,7 @@ app serving `mistralai/Mistral-7B-Instruct-v0.2` on a GPU.
    seconds), so a reading session with several selections stays fast while an idle T4 is
    released soon after. `max_containers` caps the number of `MatchVerse` containers running
    at once (default 2, see Cost limits). Before generating, `match` counts the tokens of the
-   full prompt and refuses one over `MAX_PROMPT_TOKENS` (4096) without calling the model.
+   full prompt and refuses one over `MAX_PROMPT_TOKENS` (6144) without calling the model.
 
 Everything lives in one file, `wwjd_bot_modal.py`. Modal ships only the entrypoint file to
 the container automatically, so the helpers stay in it rather than a separate module.
@@ -131,10 +131,14 @@ caps bound that cost:
   is imported, and any other value fails the import, so a typo fails the deploy instead of
   removing the cap. Requests beyond the cap queue in Modal: under load they wait longer and
   may get the `303` or Modal's timeout response (see API contract).
-- `MAX_PROMPT_TOKENS` (4096): the full prompt, template included, is tokenized and refused
-  over the cap before generation. 4000 characters of ordinary text is roughly 1000 to 1500
-  tokens and the template roughly 250 (estimates), so every realistic selection fits, while
-  text that tokenizes byte by byte (about 4 tokens per character) is refused.
+- `MAX_PROMPT_TOKENS` (6144): the full prompt, template included, is tokenized and refused
+  over the cap before generation. Measured with the cached Mistral-7B-Instruct-v0.2
+  tokenizer on 4000-character samples, the full prompt is: template alone 241 tokens,
+  English 1113, Russian 2110, Arabic 3775, Thai 4242, common emoji 4242, Hindi 4398,
+  Japanese 4550, Chinese 4606, Korean 5031. Common CJK characters and emoji are single
+  tokens, so all of these fit. Byte fallback is refused: rare CJK characters take about 3
+  tokens each (12242) and characters outside the vocabulary, such as U+20000, about 4
+  (16242). Prompt plus the 500 generated tokens stays under 6,700 of the model's 32,768.
 - `MAX_BODY_BYTES` (65536): `verse_api` stops reading a body past 64 KiB and answers `413`.
   The 4000 character text, even at the worst JSON escape of 12 bytes per character, fits
   in 48,000 bytes.
@@ -169,7 +173,7 @@ parsed as JSON whatever the `Content-Type` header says.
 | `text` is longer than 4000 characters (`MAX_TEXT_LENGTH`, counted with `len(text)`; whitespace-only text of any length is the empty-text case above) | `422` | `{"error": "The 'text' field must be at most 4000 characters.", "id": "<id>"}`, returned before any GPU work; the text is not echoed back |
 | Body larger than 65536 bytes (`MAX_BODY_BYTES`), by its `Content-Length` or by the bytes actually read | `413` | `{"error": "The request body must be at most 65536 bytes.", "id": "<id>"}`, returned before any JSON parsing or GPU work |
 | Body is not valid JSON, `text` key missing, or the body is not valid for `{"text": str}` | `422` | FastAPI's default validation error (`{"detail": [...]}`); for invalid JSON it is FastAPI's own `json_invalid` error |
-| The full prompt is longer than 4096 tokens (`MAX_PROMPT_TOKENS`) | `422` | `{"error": "The 'text' field is too long for the model; select less text.", "id": "<id>"}`, returned before generation; the text is not echoed back |
+| The full prompt is longer than 6144 tokens (`MAX_PROMPT_TOKENS`) | `422` | `{"error": "The 'text' field is too long for the model; select less text.", "id": "<id>"}`, returned before generation; the text is not echoed back |
 | The model output cannot be parsed into three non-empty string fields, even by the fallback | `502` | `{"error": "The model returned a response that could not be parsed.", "id": "<id>"}` |
 | Any exception while calling `MatchVerse.match`, including a container whose enter hook fails (that call fails only once Modal escalates the crash loop to input failures, so a `303` can come first, or Modal's timeout response if escalation outlasts `timeout=600`) | `500` | `{"error": "Internal error while processing the request.", "id": "<id>"}` |
 | Request still running after 150 seconds (Modal web endpoint limit, likely on a cold start) | `303` | Redirect to a result URL; each fetch of it waits up to another 150 seconds and returns one of the other responses here, or another `303` if the request is still running |

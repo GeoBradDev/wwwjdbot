@@ -369,11 +369,15 @@ def _load_model(token: str):
 
 
 # A cost bound, not a fit bound: Mistral-7B-Instruct-v0.2 takes 32,768 tokens.
-# The template is roughly 250 tokens and 4000 characters of text is roughly
-# 1000 to 1500 tokens (about 4000 for dense scripts), so 4096 accepts every
-# realistic selection but rejects the byte-fallback worst case (about 4
-# tokens per character). These counts are estimates; see the issue #12 plan.
-MAX_PROMPT_TOKENS = 4096
+# Measured with the cached Mistral tokenizer, build_prompt(text) for 4000
+# characters is: template alone 241, English 1113, Russian 2110, Arabic 3775,
+# Thai 4242, common emoji 4242, Hindi 4398, Japanese 4550, Chinese 4606,
+# Korean 5031. Common CJK and emoji are single tokens; byte fallback hits rare
+# CJK (about 3 tokens per character, 12242) and characters outside the
+# vocabulary such as U+20000 (about 4, 16242). 6144 (about 1.5 tokens per
+# character) accepts every ordinary sample and refuses the byte-fallback
+# cases; prompt plus 500 new tokens stays under 6,700.
+MAX_PROMPT_TOKENS = 6144
 RESULT_INPUT_TOO_LONG = "input_too_long"
 
 
