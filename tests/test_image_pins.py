@@ -15,6 +15,9 @@ APP_FILE = ROOT / "wwjd_bot_modal.py"
 REQ_IN = ROOT / "requirements.in"
 REQ_TXT = ROOT / "requirements.txt"
 REQ_DEV = ROOT / "requirements-dev.txt"
+REQ_API_IN = ROOT / "requirements-api.in"
+REQ_API_TXT = ROOT / "requirements-api.txt"
+GPU_ONLY = ("torch", "transformers", "accelerate", "bitsandbytes")
 
 PIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?==[A-Za-z0-9.+!_-]+$")
 
@@ -166,6 +169,46 @@ def test_hf_home_set_on_image():
                 ):
                     found = True
     assert found, 'image does not call .env({"HF_HOME": MODEL_DIR})'
+
+
+# Issue #2: the CPU endpoint image has its own lock without GPU packages
+
+
+def test_requirements_api_txt_every_line_pinned():
+    assert REQ_API_TXT.exists(), "requirements-api.txt (compiled API lock) is missing"
+    lines = _requirement_lines(REQ_API_TXT)
+    assert lines, "requirements-api.txt has no requirements"
+    for line in lines:
+        assert not line.startswith("-"), f"option or editable line in API lock: {line!r}"
+        assert "://" not in line, f"URL requirement in API lock: {line!r}"
+        assert PIN_RE.match(line), f"not pinned: {line!r}"
+
+
+def test_requirements_api_txt_has_no_gpu_packages():
+    pins = _pins(REQ_API_TXT)
+    for name in GPU_ONLY:
+        assert name not in pins, f"{name} must not be in the API image"
+    assert not [name for name in pins if name.startswith("nvidia-")], "CUDA wheels in the API lock"
+
+
+def test_requirements_api_txt_matches_the_gpu_lock():
+    api = _pins(REQ_API_TXT)
+    gpu = _pins(REQ_TXT)
+    for name in ("fastapi", "pydantic", "starlette"):
+        assert name in api, f"{name} missing from the API lock"
+    for name, version in api.items():
+        assert name in gpu, f"{name} is in the API lock but not in requirements.txt"
+        assert gpu[name] == version, f"{name}: API lock {version} != GPU lock {gpu[name]}"
+
+
+def test_requirements_api_in_pins_fastapi_and_pydantic():
+    assert REQ_API_IN.exists(), "requirements-api.in is missing"
+    pins = _pins(REQ_API_IN)
+    assert set(pins) == {"fastapi", "pydantic"}
+    assert pins["fastapi"] == _pins(REQ_IN)["fastapi"]
+    assert pins["pydantic"] == _pins(REQ_TXT)["pydantic"]
+    for name, version in pins.items():
+        assert _pins(REQ_API_TXT).get(name) == version, f"{name} lock != {version}"
 
 
 # Defaults unchanged, test deploys isolated
