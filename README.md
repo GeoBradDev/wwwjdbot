@@ -128,10 +128,11 @@ caps bound that cost:
 
 - `max_containers` on `MatchVerse`: at most `MAX_GPU_CONTAINERS` T4 containers run at once.
   The default is 2, and an empty or unset `WWJD_MAX_GPU_CONTAINERS` means the default; set it
-  (a whole number of at least 1) in the shell that runs `modal deploy` to change it. Like
-  `WWJD_APP_NAME` it is read when the file is imported, and any other value fails the
-  import, so a typo fails the deploy instead of removing the cap. There is no upper bound, so
-  a large value effectively removes the cap. The cap is per app: a test deploy with its own
+  (a whole number from 1 to 4294967295, the largest value Modal accepts; leading zeros are
+  ignored) in the shell that runs `modal deploy` to change it. Like `WWJD_APP_NAME` it is
+  read when the file is imported, and any other value fails the import with a message naming
+  the env var, so a typo fails the deploy instead of removing the cap. A large value within
+  that range effectively removes the cap. The cap is per app: a test deploy with its own
   `WWJD_APP_NAME` runs its own containers on top of production's. Requests beyond the cap queue in Modal: under load they wait longer and
   may get the `303` or Modal's timeout response (see API contract).
 - `MAX_PROMPT_TOKENS` (6144): the full prompt, template included, is tokenized and refused

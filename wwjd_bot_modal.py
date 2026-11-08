@@ -51,6 +51,8 @@ def _full_text_image_env() -> dict:
 
 MAX_GPU_CONTAINERS_ENV = "WWJD_MAX_GPU_CONTAINERS"
 DEFAULT_MAX_GPU_CONTAINERS = 2
+# Modal stores max_containers as a uint32 and rejects anything larger.
+_MAX_GPU_CONTAINERS_LIMIT = 2**32 - 1
 
 
 def _max_gpu_containers() -> int:
@@ -60,9 +62,16 @@ def _max_gpu_containers() -> int:
     raw = os.environ.get(MAX_GPU_CONTAINERS_ENV, "").strip()
     if not raw:
         return DEFAULT_MAX_GPU_CONTAINERS
-    if not re.fullmatch(r"[0-9]+", raw) or int(raw) < 1:
-        raise ValueError(f"{MAX_GPU_CONTAINERS_ENV} must be a whole number of at least 1")
-    return int(raw)
+    digits = raw.lstrip("0")
+    # The length check comes first: int() refuses strings over 4300 digits.
+    if (
+        not re.fullmatch(r"[0-9]+", raw)
+        or not digits
+        or len(digits) > len(str(_MAX_GPU_CONTAINERS_LIMIT))
+        or int(digits) > _MAX_GPU_CONTAINERS_LIMIT
+    ):
+        raise ValueError(f"{MAX_GPU_CONTAINERS_ENV} must be a whole number from 1 to {_MAX_GPU_CONTAINERS_LIMIT}")
+    return int(digits)
 
 
 # Upper bound on concurrently running MatchVerse (GPU) containers; requests
