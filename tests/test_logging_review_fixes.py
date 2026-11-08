@@ -2,6 +2,7 @@
 containers' exception lines can be told apart, and an import with the debug
 flag set warns that full text logging is on."""
 
+import asyncio
 import importlib
 import logging
 import re
@@ -34,7 +35,12 @@ def app_module(monkeypatch, caplog):
         sys.modules.pop("wwjd_bot_modal", None)
 
 
-def _raising(text, request_id=None):
+def _handle(app_module, text, match):
+    # handle_verse_request is async (issue #2); run it to completion.
+    return asyncio.run(app_module.handle_verse_request(text, match))
+
+
+async def _raising(text, request_id=None):
     raise RuntimeError()
 
 
@@ -49,13 +55,13 @@ def _error_where(caplog):
 
 
 def test_500_path_logs_status_outcome(app_module, caplog):
-    status, body = app_module.handle_verse_request("hello", _raising)
+    status, body = _handle(app_module, "hello", _raising)
     assert status == 500
     assert f"[{body['id']}] done: status=500" in caplog.text
 
 
 def test_verse_api_and_match_verse_exception_lines_differ(app_module, caplog):
-    app_module.handle_verse_request("hello", _raising)
+    _handle(app_module, "hello", _raising)
     handler_side = _error_where(caplog)
     caplog.clear()
 

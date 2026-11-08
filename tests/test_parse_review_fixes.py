@@ -2,6 +2,7 @@
 missed fields followed by prose on a new line, decoded escapes only partly,
 and accepted lone surrogates that Starlette cannot encode."""
 
+import asyncio
 import importlib
 import json
 import sys
@@ -21,6 +22,19 @@ def app_module(monkeypatch):
         yield importlib.import_module("wwjd_bot_modal")
     finally:
         sys.modules.pop("wwjd_bot_modal", None)
+
+
+def _handle(app_module, text, match):
+    # handle_verse_request is async (issue #2); run it to completion.
+    return asyncio.run(app_module.handle_verse_request(text, match))
+
+
+def _async(func):
+    # Wraps a sync fake so handle_verse_request can await it.
+    async def match(text, request_id=None):
+        return func(text, request_id=request_id)
+
+    return match
 
 
 def _ok(reference, verse, explanation):
@@ -101,7 +115,7 @@ def test_parse_rejects_lone_surrogate(app_module, generated):
 
 def test_handler_rejects_lone_surrogate_with_502(app_module):
     result = {"reference": "A", "verse": "lone \ud800", "explanation": "C"}
-    status, body = app_module.handle_verse_request("Some statement", lambda text, request_id=None: result)
+    status, body = _handle(app_module, "Some statement", _async(lambda text, request_id=None: result))
     assert status == 502
     assert body["error"] == app_module.ERROR_UNPARSEABLE
 
@@ -119,8 +133,8 @@ def test_handler_rejects_lone_surrogate_with_502(app_module):
     ],
 )
 def test_handler_200_payloads_render_with_starlette_json(app_module, generated, expected_status):
-    status, body = app_module.handle_verse_request(
-        "Some statement", lambda text, request_id=None: _parse(app_module, generated)
+    status, body = _handle(
+        app_module, "Some statement", _async(lambda text, request_id=None: _parse(app_module, generated))
     )
     assert status == expected_status
     _starlette_render(body)

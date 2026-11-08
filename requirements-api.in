@@ -1,0 +1,4 @@
+# Top-level dependencies of the verse_api (CPU) image. Compile the lock with:
+#   uv pip compile requirements-api.in -o requirements-api.txt -c requirements.txt --python-version 3.12 --python-platform x86_64-manylinux_2_28
+fastapi[standard]==0.129.2
+pydantic==2.14.3

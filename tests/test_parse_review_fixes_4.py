@@ -4,6 +4,7 @@ with garbage. An empty value now moves to the key's next occurrence, and a
 valid JSON object with all three keys that does not qualify is a parse
 failure without the regex fallback."""
 
+import asyncio
 import importlib
 import sys
 from pathlib import Path
@@ -31,6 +32,19 @@ def app_module(monkeypatch):
         sys.modules.pop("wwjd_bot_modal", None)
 
 
+def _handle(app_module, text, match):
+    # handle_verse_request is async (issue #2); run it to completion.
+    return asyncio.run(app_module.handle_verse_request(text, match))
+
+
+def _async(func):
+    # Wraps a sync fake so handle_verse_request can await it.
+    async def match(text, request_id=None):
+        return func(text, request_id=request_id)
+
+    return match
+
+
 def _ok(reference, verse, explanation):
     return {
         "reference": reference,
@@ -56,8 +70,8 @@ def test_empty_last_value_before_later_quote_is_parse_failure(app_module, genera
 
 @pytest.mark.parametrize("generated", EMPTY_LAST_VALUE)
 def test_empty_last_value_before_later_quote_is_502(app_module, generated):
-    status, body = app_module.handle_verse_request(
-        "Some statement", lambda text, request_id=None: _parse(app_module, generated)
+    status, body = _handle(
+        app_module, "Some statement", _async(lambda text, request_id=None: _parse(app_module, generated))
     )
     assert status == 502
     assert body["error"] == app_module.ERROR_UNPARSEABLE

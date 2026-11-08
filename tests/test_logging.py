@@ -5,6 +5,7 @@ Fakes raise prebuilt exceptions, so no traceback source line contains a
 sentinel; a sentinel in the logs can only come from a logged message."""
 
 import ast
+import asyncio
 import importlib
 import inspect
 import logging
@@ -44,13 +45,18 @@ def app_module(monkeypatch, caplog):
         sys.modules.pop("wwjd_bot_modal", None)
 
 
+def _handle(app_module, text, match):
+    # handle_verse_request is async (issue #2); run it to completion.
+    return asyncio.run(app_module.handle_verse_request(text, match))
+
+
 class _Match:
     def __init__(self, result=None, exc=None):
         self.result = result
         self.exc = exc
         self.request_ids = []
 
-    def __call__(self, text, request_id=None):
+    async def __call__(self, text, request_id=None):
         self.request_ids.append(request_id)
         if self.exc is not None:
             raise self.exc
@@ -112,7 +118,7 @@ def test_reimport_does_not_stack_handlers(app_module, monkeypatch):
 
 def test_success_logs_metadata_only(app_module, caplog):
     match = _Match(GOOD)
-    status, _ = app_module.handle_verse_request(TEXT, match)
+    status, _ = _handle(app_module, TEXT, match)
     assert status == 200
     logs = _logged(caplog)
     _assert_no_sentinel(logs)
@@ -122,7 +128,7 @@ def test_success_logs_metadata_only(app_module, caplog):
 
 
 def test_422_logs_metadata_only(app_module, caplog):
-    status, body = app_module.handle_verse_request("   ", _Match(GOOD))
+    status, body = _handle(app_module, "   ", _Match(GOOD))
     assert status == 422
     logs = _logged(caplog)
     assert body["id"] in logs
@@ -140,7 +146,7 @@ def test_422_logs_metadata_only(app_module, caplog):
     ],
 )
 def test_502_logs_reason_category_only(app_module, caplog, result, reason):
-    status, body = app_module.handle_verse_request(TEXT, _Match(result))
+    status, body = _handle(app_module, TEXT, _Match(result))
     assert status == 502
     logs = _logged(caplog)
     _assert_no_sentinel(logs)
@@ -150,7 +156,7 @@ def test_502_logs_reason_category_only(app_module, caplog, result, reason):
 
 
 def test_500_logs_type_names_and_frames_but_no_messages(app_module, caplog):
-    status, body = app_module.handle_verse_request(TEXT, _Match(exc=_chained_exception()))
+    status, body = _handle(app_module, TEXT, _Match(exc=_chained_exception()))
     assert status == 500
     logs = _logged(caplog)
     _assert_no_sentinel(logs)
@@ -164,13 +170,13 @@ def test_500_logs_type_names_and_frames_but_no_messages(app_module, caplog):
 
 
 def test_500_without_cause_logs_context_type(app_module, caplog):
-    def failing(text, request_id=None):
+    async def failing(text, request_id=None):
         try:
             raise KeyError(TEXT)
         except KeyError:
             raise TypeError(f"wrapped {TEXT}")  # noqa: B904 the context is the point
 
-    status, _ = app_module.handle_verse_request(TEXT, failing)
+    status, _ = _handle(app_module, TEXT, failing)
     assert status == 500
     logs = _logged(caplog)
     _assert_no_sentinel(logs)
@@ -195,7 +201,7 @@ def test_error_bodies_hold_no_exception_text_or_output(
 ):
     if flag is not None:
         monkeypatch.setenv(FLAG, flag)
-    status, body = app_module.handle_verse_request(TEXT, match)
+    status, body = _handle(app_module, TEXT, match)
     assert status == expected_status
     assert set(body) == {"error", "id"}
     assert ID_RE.fullmatch(body["id"])
@@ -208,19 +214,19 @@ def test_error_bodies_hold_no_exception_text_or_output(
 
 def test_flag_on_logs_user_text(app_module, monkeypatch, caplog):
     monkeypatch.setenv(FLAG, "1")
-    app_module.handle_verse_request(TEXT, _Match(GOOD))
+    _handle(app_module, TEXT, _Match(GOOD))
     assert TEXT in _logged(caplog)
 
 
 def test_flag_on_logs_raw_output_on_502(app_module, monkeypatch, caplog):
     monkeypatch.setenv(FLAG, "1")
-    app_module.handle_verse_request(TEXT, _Match({"error": "parse_failed", "raw_output": OUTPUT}))
+    _handle(app_module, TEXT, _Match({"error": "parse_failed", "raw_output": OUTPUT}))
     assert OUTPUT in _logged(caplog)
 
 
 def test_flag_on_logs_full_exception(app_module, monkeypatch, caplog):
     monkeypatch.setenv(FLAG, "1")
-    app_module.handle_verse_request(TEXT, _Match(exc=_chained_exception()))
+    _handle(app_module, TEXT, _Match(exc=_chained_exception()))
     logs = _logged(caplog)
     assert f"tokenizer choked on {TEXT}" in logs
     assert f"bad output {OUTPUT}" in logs
@@ -229,9 +235,9 @@ def test_flag_on_logs_full_exception(app_module, monkeypatch, caplog):
 @pytest.mark.parametrize("value", ["0", "true", "", "yes"])
 def test_other_flag_values_are_off(app_module, monkeypatch, caplog, value):
     monkeypatch.setenv(FLAG, value)
-    app_module.handle_verse_request(TEXT, _Match(GOOD))
-    app_module.handle_verse_request(TEXT, _Match({"error": "parse_failed", "raw_output": OUTPUT}))
-    app_module.handle_verse_request(TEXT, _Match(exc=_chained_exception()))
+    _handle(app_module, TEXT, _Match(GOOD))
+    _handle(app_module, TEXT, _Match({"error": "parse_failed", "raw_output": OUTPUT}))
+    _handle(app_module, TEXT, _Match(exc=_chained_exception()))
     _assert_no_sentinel(_logged(caplog))
 
 
@@ -243,7 +249,7 @@ def test_full_text_image_env(app_module, monkeypatch):
     assert app_module._full_text_image_env() == {"WWJD_LOG_FULL_TEXT": "1"}
 
 
-# _log_generation (match_verse's logging helper)
+# _log_generation (MatchVerse.match's logging helper)
 
 GEN_OK = '{"reference": "Matthew 5:44", "verse": "Love your enemies", "explanation": "' + OUTPUT + '"}'
 GEN_BAD = f"no json here {OUTPUT}"
@@ -296,14 +302,14 @@ def test_log_generation_flag_on_logs_prompt_and_output(app_module, monkeypatch, 
     [_Match(exc=_chained_exception()), _Match({"error": "parse_failed", "raw_output": OUTPUT})],
 )
 def test_match_receives_the_body_id(app_module, caplog, match):
-    _, body = app_module.handle_verse_request(TEXT, match)
+    _, body = _handle(app_module, TEXT, match)
     assert match.request_ids == [body["id"]]
     assert body["id"] in _logged(caplog)
 
 
 def test_match_receives_a_request_id_on_success(app_module):
     match = _Match(GOOD)
-    app_module.handle_verse_request(TEXT, match)
+    _handle(app_module, TEXT, match)
     assert len(match.request_ids) == 1
     assert ID_RE.fullmatch(match.request_ids[0])
 
@@ -321,7 +327,7 @@ def test_normalize_request_id_replaces_anything_else(app_module, value):
     assert result != value
 
 
-# Criterion 7: match_verse never lets the original exception out
+# Criterion 7: MatchVerse.match never lets the original exception out
 
 
 def test_run_guarded_raises_bare_match_verse_error(app_module, caplog):
@@ -349,9 +355,10 @@ def test_run_guarded_passes_the_return_value_through(app_module):
 
 
 def test_match_verse_accepts_request_id_defaulting_to_none(app_module):
-    raw = inspect.unwrap(app_module.match_verse._raw_f_)
+    method = app_module.MatchVerse._get_user_cls().__dict__["match"]
+    raw = inspect.unwrap(method._get_raw_f())
     params = inspect.signature(raw).parameters
-    assert list(params) == ["text", "request_id"]
+    assert list(params) == ["self", "text", "request_id"]
     assert params["request_id"].default is None
 
 
@@ -362,21 +369,26 @@ def _stub_module(name, **attrs):
     return module
 
 
-@pytest.mark.filterwarnings("ignore:The match_verse function is executing locally")
+@pytest.mark.filterwarnings("ignore:The MatchVerse.match function is executing locally")
 def test_match_verse_model_failure_surfaces_as_match_verse_error(app_module, monkeypatch, caplog):
     exc = OSError(f"could not tokenize {TEXT}")
 
-    def _from_pretrained(*args, **kwargs):
-        raise exc
+    # The model loads once in the enter hook; the per-request failure now
+    # happens in generation, at the tokenizer call.
+    class _Tokenizer:
+        eos_token = "</s>"
 
-    loader = types.SimpleNamespace(from_pretrained=_from_pretrained)
+        def __call__(self, *args, **kwargs):
+            raise exc
+
+    model = types.SimpleNamespace(eval=lambda: None, device="cpu")
     monkeypatch.setitem(
         sys.modules,
         "transformers",
         _stub_module(
             "transformers",
-            AutoTokenizer=loader,
-            AutoModelForCausalLM=loader,
+            AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda *a, **k: _Tokenizer()),
+            AutoModelForCausalLM=types.SimpleNamespace(from_pretrained=lambda *a, **k: model),
             BitsAndBytesConfig=lambda **kwargs: kwargs,
         ),
     )
@@ -384,7 +396,7 @@ def test_match_verse_model_failure_surfaces_as_match_verse_error(app_module, mon
     monkeypatch.setenv("HUGGINGFACE_TOKEN", "hf_fake")
 
     with pytest.raises(app_module.MatchVerseError) as info:
-        app_module.match_verse.local(TEXT, request_id=RID)
+        app_module.MatchVerse().match.local(TEXT, request_id=RID)
     assert info.value.__cause__ is None and info.value.__context__ is None
     _assert_no_sentinel(str(info.value))
     logs = _logged(caplog)

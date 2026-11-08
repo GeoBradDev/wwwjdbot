@@ -1,8 +1,8 @@
-"""Issue #3: verse_api maps match_verse results to status codes.
+"""Issue #3: verse_api maps MatchVerse.match results to status codes.
 
 handle_verse_request holds the endpoint logic without importing FastAPI, so it
 runs in CI; the verse_api wrapper is tested with fastapi.responses stubbed.
-match_verse is never really called: no GPU, torch, transformers or Modal
+MatchVerse.match is never really called: no GPU, torch, transformers or Modal
 credentials are needed."""
 
 import asyncio
@@ -42,6 +42,11 @@ def app_module(monkeypatch):
         sys.modules.pop("wwjd_bot_modal", None)
 
 
+def _handle(app_module, text, match):
+    # handle_verse_request is async (issue #2); run it to completion.
+    return asyncio.run(app_module.handle_verse_request(text, match))
+
+
 class _Match:
     def __init__(self, result=None, exc=None):
         self.result = result
@@ -49,7 +54,7 @@ class _Match:
         self.calls = []
         self.request_ids = []
 
-    def __call__(self, text, request_id=None):
+    async def __call__(self, text, request_id=None):
         self.calls.append(text)
         self.request_ids.append(request_id)
         if self.exc is not None:
@@ -66,7 +71,7 @@ def _assert_error(app_module, status, body, expected_status, message):
 
 def test_success_returns_exactly_the_raw_shape(app_module):
     match = _Match(GOOD)
-    status, body = app_module.handle_verse_request("Some statement", match)
+    status, body = _handle(app_module, "Some statement", match)
     assert status == 200
     assert body == GOOD_RAW
     assert match.calls == ["Some statement"]
@@ -75,14 +80,14 @@ def test_success_returns_exactly_the_raw_shape(app_module):
 @pytest.mark.parametrize("text", ["", "   \n"])
 def test_empty_or_whitespace_text_is_422_without_calling_match(app_module, text):
     match = _Match(GOOD)
-    status, body = app_module.handle_verse_request(text, match)
+    status, body = _handle(app_module, text, match)
     _assert_error(app_module, status, body, 422, app_module.ERROR_EMPTY_TEXT)
     assert match.calls == []
 
 
 def test_non_string_text_is_422(app_module):
     match = _Match(GOOD)
-    status, body = app_module.handle_verse_request(None, match)
+    status, body = _handle(app_module, None, match)
     _assert_error(app_module, status, body, 422, app_module.ERROR_EMPTY_TEXT)
     assert match.calls == []
 
@@ -90,7 +95,7 @@ def test_non_string_text_is_422(app_module):
 def test_parse_failure_is_502_without_raw_output(app_module):
     raw_output = "the model rambled: SECRET-RAW-OUTPUT"
     match = _Match({"error": "parse_failed", "raw_output": raw_output})
-    status, body = app_module.handle_verse_request("Some statement", match)
+    status, body = _handle(app_module, "Some statement", match)
     _assert_error(app_module, status, body, 502, app_module.ERROR_UNPARSEABLE)
     assert "SECRET-RAW-OUTPUT" not in repr(body)
 
@@ -109,20 +114,20 @@ def test_parse_failure_is_502_without_raw_output(app_module):
     ],
 )
 def test_partial_non_string_or_non_dict_result_is_502(app_module, result):
-    status, body = app_module.handle_verse_request("Some statement", _Match(result))
+    status, body = _handle(app_module, "Some statement", _Match(result))
     _assert_error(app_module, status, body, 502, app_module.ERROR_UNPARSEABLE)
 
 
 def test_exception_from_match_is_generic_500(app_module):
     match = _Match(exc=RuntimeError("secret detail"))
-    status, body = app_module.handle_verse_request("Some statement", match)
+    status, body = _handle(app_module, "Some statement", match)
     _assert_error(app_module, status, body, 500, app_module.ERROR_INTERNAL)
     assert "secret detail" not in repr(body)
 
 
 def test_error_ids_differ_between_calls(app_module):
-    _, first = app_module.handle_verse_request("", _Match(GOOD))
-    _, second = app_module.handle_verse_request("", _Match(GOOD))
+    _, first = _handle(app_module, "", _Match(GOOD))
+    _, second = _handle(app_module, "", _Match(GOOD))
     assert first["id"] != second["id"]
 
 
@@ -141,7 +146,13 @@ def test_verse_api_wrapper_returns_json_response(app_module, monkeypatch):
     monkeypatch.setitem(sys.modules, "fastapi.responses", responses)
 
     remote = _Match(GOOD)
-    monkeypatch.setattr(app_module, "match_verse", types.SimpleNamespace(remote=remote))
+
+    def _blocking_remote(*args, **kwargs):
+        raise AssertionError("the blocking .remote was called; use .remote.aio")
+
+    _blocking_remote.aio = remote
+    method = types.SimpleNamespace(remote=_blocking_remote)
+    monkeypatch.setattr(app_module, "MatchVerse", lambda: types.SimpleNamespace(match=method))
 
     raw = inspect.unwrap(app_module.verse_api._raw_f_)
     assert inspect.iscoroutinefunction(raw)
