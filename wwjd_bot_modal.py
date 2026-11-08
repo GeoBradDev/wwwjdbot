@@ -556,12 +556,16 @@ def _parse_verse_request(raw: bytes) -> VerseRequest:
       FastAPI's missing-body error (422 {"detail": [...]});
     - invalid JSON (including a whitespace-only body): RequestValidationError
       with FastAPI's json_invalid error, whose input is {} rather than the body;
-    - any other failure to decode (invalid UTF-8, nesting too deep, an integer
-      over Python's digit limit): HTTPException 400 with FastAPI's fixed detail;
+    - any other failure to decode (invalid UTF-8, nesting too deep for
+      json.loads, an integer over Python's digit limit): HTTPException 400 with
+      FastAPI's fixed detail;
     - a decoded value that does not fit {"text": str}: RequestValidationError
       with pydantic's errors (validated with from_attributes=True, as FastAPI
       does, so a non-object value is model_attributes_type), loc prefixed by
-      "body"."""
+      "body". If FastAPI's jsonable_encoder hits RecursionError on those
+      errors (nested input that decoded but is too deep to encode), the same
+      400 instead. This one case differs from FastAPI 0.129.2 on purpose: its
+      422 handler raised there and the client got a plain 500."""
     missing = [{"type": "missing", "loc": ("body",), "msg": "Field required", "input": None}]
     if raw == b"":
         errors = missing
@@ -585,8 +589,16 @@ def _parse_verse_request(raw: bytes) -> VerseRequest:
                     return VerseRequest.model_validate(data, from_attributes=True)
                 except ValidationError as e:
                     errors = [{**error, "loc": ("body", *error["loc"])} for error in e.errors(include_url=False)]
+    from fastapi import HTTPException
+    from fastapi.encoders import jsonable_encoder
     from fastapi.exceptions import RequestValidationError
 
+    # FastAPI's 422 handler encodes the errors, input included; deeply nested
+    # input that decoded fine would hit RecursionError there and become a 500.
+    try:
+        jsonable_encoder(errors)
+    except RecursionError:
+        raise HTTPException(status_code=400, detail=ERROR_BODY_UNPARSEABLE) from None
     raise RequestValidationError(errors)
 
 
