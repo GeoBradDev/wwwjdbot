@@ -298,6 +298,16 @@ class _HTTPException(Exception):
         self.detail = detail
 
 
+def _jsonable_encoder(value):
+    # Recurses like fastapi.encoders.jsonable_encoder, so deep input hits
+    # RecursionError the same way.
+    if isinstance(value, dict):
+        return {key: _jsonable_encoder(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_jsonable_encoder(item) for item in value]
+    return value
+
+
 @pytest.fixture
 def stub_fastapi(monkeypatch):
     responses = types.ModuleType("fastapi.responses")
@@ -308,6 +318,10 @@ def stub_fastapi(monkeypatch):
     fastapi.responses = responses
     fastapi.exceptions = exceptions
     fastapi.HTTPException = _HTTPException
+    encoders = types.ModuleType("fastapi.encoders")
+    encoders.jsonable_encoder = _jsonable_encoder
+    fastapi.encoders = encoders
+    monkeypatch.setitem(sys.modules, "fastapi.encoders", encoders)
     monkeypatch.setitem(sys.modules, "fastapi", fastapi)
     monkeypatch.setitem(sys.modules, "fastapi.responses", responses)
     monkeypatch.setitem(sys.modules, "fastapi.exceptions", exceptions)
@@ -553,3 +567,31 @@ def test_verse_api_non_object_json_is_fastapis_model_attributes_type(app_module,
     ]
     assert errors[0]["input"] == json.loads(raw)
     assert gpu.calls == []
+
+
+# Delta review: valid JSON too deep for FastAPI's error encoder
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(b'{"text": ' + b"[" * 2000 + b"]" * 2000 + b"}", id="text_nested_2000"),
+        pytest.param(b'{"text": ' + b"[" * 5000 + b"]" * 5000 + b"}", id="text_nested_5000"),
+        pytest.param(b"[" * 1500 + b"]" * 1500, id="top_level_nested_1500"),
+    ],
+)
+def test_verse_api_valid_json_too_deep_to_encode_is_400(app_module, stub_fastapi, gpu, raw):
+    assert len(raw) <= app_module.MAX_BODY_BYTES
+    json.loads(raw)  # decodes: the failure is in encoding the validation errors
+    with pytest.raises(_HTTPException) as info:
+        _verse_api(app_module, _FakeRequest(raw))
+    assert info.value.status_code == 400
+    assert info.value.detail == "There was an error parsing the body"
+    assert info.value.__cause__ is None
+    assert gpu.calls == []
+
+
+def test_verse_api_shallow_nested_text_is_still_a_validation_error(app_module, stub_fastapi, gpu):
+    with pytest.raises(_RequestValidationError) as info:
+        _verse_api(app_module, _FakeRequest(b'{"text": [[["x"]]]}'))
+    assert [(e["type"], tuple(e["loc"])) for e in info.value.errors()] == [("string_type", ("body", "text"))]
