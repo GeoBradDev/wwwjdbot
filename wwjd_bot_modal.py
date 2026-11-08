@@ -381,11 +381,16 @@ def _load_model(token: str):
 # Measured with the cached Mistral tokenizer, build_prompt(text) for 4000
 # characters is: template alone 241, English 1113, Russian 2110, Arabic 3775,
 # Thai 4242, common emoji 4242, Hindi 4398, Japanese 4550, Chinese 4606,
-# Korean 5031. Common CJK and emoji are single tokens; byte fallback hits rare
-# CJK (about 3 tokens per character, 12242) and characters outside the
-# vocabulary such as U+20000 (about 4, 16242). 6144 (about 1.5 tokens per
-# character) accepts every ordinary sample and refuses the byte-fallback
-# cases; prompt plus 500 new tokens stays under 6,700.
+# Korean 5031; Tamil, Bengali, Kannada, Khmer, Greek, Hebrew, code and URLs
+# also fit at full length. Common CJK and emoji are single tokens. Scripts the
+# vocabulary mostly splits into byte tokens fit only at shorter lengths, for
+# example Punjabi 9576 at 4000 (about 2500 characters accepted), Malayalam
+# 9278, Amharic about 8600 to 8800, Telugu about 6600, Burmese 6362, some
+# Traditional and Classical Chinese about 6200; rare CJK is about 3 tokens per
+# character (12242) and characters outside the vocabulary such as U+20000
+# about 4 (16242). 6144 (about 1.5 tokens per character at 4000) is a cost
+# bound; raise it here to accept more. Prompt plus 500 new tokens stays under
+# 6,700.
 MAX_PROMPT_TOKENS = 6144
 RESULT_INPUT_TOO_LONG = "input_too_long"
 

@@ -140,9 +140,16 @@ caps bound that cost:
   tokenizer on 4000-character samples, the full prompt is: template alone 241 tokens,
   English 1113, Russian 2110, Arabic 3775, Thai 4242, common emoji 4242, Hindi 4398,
   Japanese 4550, Chinese 4606, Korean 5031. Common CJK characters and emoji are single
-  tokens, so all of these fit. Byte fallback is refused: rare CJK characters take about 3
-  tokens each (12242) and characters outside the vocabulary, such as U+20000, about 4
-  (16242). Prompt plus the 500 generated tokens stays under 6,700 of the model's 32,768.
+  tokens, so these fit at the full 4000 characters, as do, among others, Tamil, Bengali,
+  Kannada, Khmer, Greek, Hebrew, Georgian, Vietnamese, code and URLs. Text in scripts that
+  Mistral's vocabulary mostly splits into byte tokens is accepted only at shorter lengths.
+  Measured examples (tokens at 4000 characters, then about how many characters fit):
+  Punjabi 9576 (2527), Malayalam 9278 (2613), Amharic 8846 (2744), Gujarati 7876 (3091),
+  Sinhala 7606 (3206), Telugu 6666 (3675), Burmese 6362 (3858), Classical Chinese 6270
+  (3920), Traditional Chinese news text 6198 (3964). Rare CJK characters take about 3 tokens
+  each (12242 at 4000) and characters outside the vocabulary, such as U+20000, about 4
+  (16242). The cap is a cost bound, not a model limit; raise it by editing the constant.
+  Prompt plus the 500 generated tokens stays under 6,700 of the model's 32,768.
 - `MAX_BODY_BYTES` (65536): `verse_api` answers `413` for a declared `Content-Length` over
   the cap without reading the body, and otherwise stops reading at the first chunk that takes
   the total past the cap, so it never parses more than 64 KiB. Modal delivers the body in
