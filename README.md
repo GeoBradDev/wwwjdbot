@@ -170,8 +170,8 @@ Modal keeps it with the app's logs.
 
 By default each request logs metadata only:
 
-- the request id (the `id` returned in `422`, `500` and `502` bodies);
-- the input length, and for `422` the reason `empty_text`;
+- the request id (the `id` returned in the empty-text `422`, `500` and `502` bodies);
+- the input length, or for an empty-text `422` only the reason `empty_text`;
 - from `match_verse`: the input and output lengths, the generation time and whether the output parsed;
 - the outcome status, and for a `502` one fixed reason: `not_dict`, `match_error` or
   `invalid_fields`;
