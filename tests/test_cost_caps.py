@@ -525,3 +525,31 @@ def test_verse_api_413_on_a_5000_digit_content_length(app_module, stub_fastapi, 
         in caplog.text
     )
     assert "9" * 100 not in caplog.text
+
+
+# Delta review: JSON that is not an object gets FastAPI's errors
+
+
+def test_verse_api_json_null_is_fastapis_missing_body_error(app_module, stub_fastapi, gpu):
+    with pytest.raises(_RequestValidationError) as info:
+        _verse_api(app_module, _FakeRequest(b"null"))
+    assert info.value.errors() == [
+        {"type": "missing", "loc": ("body",), "msg": "Field required", "input": None}
+    ]
+    assert gpu.calls == []
+
+
+@pytest.mark.parametrize("raw", [b'"hello"', b"5", b"true", b"1.5", b"[1]"])
+def test_verse_api_non_object_json_is_fastapis_model_attributes_type(app_module, stub_fastapi, gpu, raw):
+    with pytest.raises(_RequestValidationError) as info:
+        _verse_api(app_module, _FakeRequest(raw))
+    errors = info.value.errors()
+    assert [(e["type"], tuple(e["loc"]), e["msg"]) for e in errors] == [
+        (
+            "model_attributes_type",
+            ("body",),
+            "Input should be a valid dictionary or object to extract fields from",
+        )
+    ]
+    assert errors[0]["input"] == json.loads(raw)
+    assert gpu.calls == []
