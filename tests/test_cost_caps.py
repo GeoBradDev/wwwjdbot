@@ -487,3 +487,41 @@ def test_verse_api_whitespace_only_body_is_json_invalid(app_module, stub_fastapi
     errors = info.value.errors()
     assert [(e["type"], tuple(e["loc"]), e["input"]) for e in errors] == [("json_invalid", ("body", 3), {})]
     assert gpu.calls == []
+
+
+# Review fixes: a Content-Length too long for int()
+
+
+def test_read_limited_body_rejects_a_5000_digit_content_length_without_reading(app_module):
+    request = _FakeRequest(headers={"content-length": "9" * 5000}, chunks=[b"x"])
+    body, measure = _read(app_module, request, 65536)
+    assert body is None
+    assert measure == "content_length=too_long"
+    assert request.stream().read == 0
+
+
+def test_read_limited_body_reads_leading_zeros_as_the_number(app_module):
+    request = _FakeRequest(headers={"content-length": "0070000"}, chunks=[b"x"])
+    body, measure = _read(app_module, request, 65536)
+    assert (body, measure) == (None, "content_length=70000")
+    assert request.stream().read == 0
+
+
+def test_read_limited_body_small_value_behind_many_zeros_is_read(app_module):
+    request = _FakeRequest(headers={"content-length": "0" * 5000 + "2"}, chunks=[b"{}", b""])
+    body, _ = _read(app_module, request, 65536)
+    assert body == b"{}"
+
+
+def test_verse_api_413_on_a_5000_digit_content_length(app_module, stub_fastapi, gpu, caplog):
+    request = _FakeRequest(headers={"content-length": "9" * 5000}, chunks=[b"x"])
+    response = _verse_api(app_module, request)
+    assert response.status_code == 413
+    assert response.content["error"] == app_module.ERROR_BODY_TOO_LARGE
+    assert request.stream().read == 0
+    assert gpu.calls == []
+    assert (
+        f"[{response.content['id']}] rejected: status=413 reason=body_too_large content_length=too_long"
+        in caplog.text
+    )
+    assert "9" * 100 not in caplog.text
