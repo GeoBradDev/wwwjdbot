@@ -595,3 +595,25 @@ def test_verse_api_shallow_nested_text_is_still_a_validation_error(app_module, s
     with pytest.raises(_RequestValidationError) as info:
         _verse_api(app_module, _FakeRequest(b'{"text": [[["x"]]]}'))
     assert [(e["type"], tuple(e["loc"])) for e in info.value.errors()] == [("string_type", ("body", "text"))]
+
+
+# Delta review: a WWJD_MAX_GPU_CONTAINERS too long for int()
+
+
+@pytest.mark.parametrize("value", ["1" * 5000, "9" * 19, "4294967296"])
+def test_huge_max_gpu_containers_fails_with_the_fixed_message(clean_import, monkeypatch, value):
+    # Modal's max_containers is a uint32; past it Modal raises its own error.
+    monkeypatch.setenv(CAP_ENV, value)
+    with pytest.raises(ValueError) as info:
+        clean_import()
+    assert str(info.value) == f"{CAP_ENV} must be a whole number from 1 to 4294967295"
+
+
+def test_max_gpu_containers_accepts_modals_maximum(clean_import, monkeypatch):
+    monkeypatch.setenv(CAP_ENV, "4294967295")
+    assert clean_import().MAX_GPU_CONTAINERS == 4294967295
+
+
+def test_max_gpu_containers_ignores_leading_zeros(clean_import, monkeypatch):
+    monkeypatch.setenv(CAP_ENV, "0" * 5000 + "3")
+    assert clean_import().MAX_GPU_CONTAINERS == 3
