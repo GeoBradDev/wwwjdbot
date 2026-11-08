@@ -515,18 +515,26 @@ async def handle_verse_request(text, match) -> tuple[int, dict]:
 MAX_BODY_BYTES = 65536
 ERROR_BODY_TOO_LARGE = f"The request body must be at most {MAX_BODY_BYTES} bytes."
 _CONTENT_LENGTH = re.compile(r"[0-9]+")
+# int() refuses digit strings over Python's 4300 digit limit; any value with
+# more significant digits than this is far over the cap anyway.
+_MAX_CONTENT_LENGTH_DIGITS = 18
 
 
 async def read_limited_body(headers, chunks, max_bytes: int) -> tuple[bytes | None, str]:
     """Return (body, "") when the body is at most max_bytes, else (None, measure).
 
     A Content-Length above the cap rejects without reading (measure
-    "content_length=<n>"). Otherwise chunks are read until the running total
+    "content_length=<n>", or "content_length=too_long" past 18 significant
+    digits, so the log stays short). Otherwise chunks are read until the running total
     exceeds the cap, and nothing after that chunk is read (measure
     "bytes_read=<n>"), so a missing or lying Content-Length is still bounded."""
     declared = (headers.get("content-length") or "").strip()
-    if _CONTENT_LENGTH.fullmatch(declared) and int(declared) > max_bytes:
-        return None, f"content_length={int(declared)}"
+    if _CONTENT_LENGTH.fullmatch(declared):
+        digits = declared.lstrip("0") or "0"
+        if len(digits) > _MAX_CONTENT_LENGTH_DIGITS:
+            return None, "content_length=too_long"
+        if int(digits) > max_bytes:
+            return None, f"content_length={int(digits)}"
     parts, total = [], 0
     async for chunk in chunks:
         total += len(chunk)
