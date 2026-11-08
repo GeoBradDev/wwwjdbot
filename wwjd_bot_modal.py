@@ -592,7 +592,8 @@ def _json_invalid(position: int, message: str) -> dict:
     }
 
 
-# No GPU: this container only validates, awaits MatchVerse and maps the result.
+# No GPU: this container only reads the body with a byte cap (a 413 past it),
+# validates it, awaits MatchVerse and maps the result.
 # Up to 20 requests share one container while they wait on GPU calls; each
 # MatchVerse container still runs one input at a time. app.function must stay
 # outermost: Modal raises if concurrent is stacked above it.

@@ -19,8 +19,9 @@ app serving `mistralai/Mistral-7B-Instruct-v0.2` on a GPU.
    no GPU and runs on a light image (`api_image`) built from `requirements-api.txt`, which has
    `fastapi[standard]` (with its extras, such as uvicorn) and pydantic but no torch,
    transformers, accelerate or bitsandbytes. It takes the raw request and reads the body
-   itself with a byte cap (`MAX_BODY_BYTES`, 64 KiB) before any JSON parsing, then validates
-   it as `{"text": str}`, awaits `MatchVerse().match.remote.aio(...)` without blocking its event loop, and
+   itself, stopping once it has read more than `MAX_BODY_BYTES` (64 KiB) and answering `413`,
+   so it never parses more than the cap; then it decodes and validates the body as
+   `{"text": str}` the way FastAPI would, awaits `MatchVerse().match.remote.aio(...)` without blocking its event loop, and
    maps the result to a status code (see API contract). `@modal.concurrent(max_inputs=20)`
    lets one CPU container serve up to 20 requests at once while they wait on the GPU;
    each `MatchVerse` container still runs one input at a time.
@@ -126,10 +127,12 @@ The endpoint has no authentication, so anyone with the URL can make it spend GPU
 caps bound that cost:
 
 - `max_containers` on `MatchVerse`: at most `MAX_GPU_CONTAINERS` T4 containers run at once.
-  The default is 2; set `WWJD_MAX_GPU_CONTAINERS` (a whole number of at least 1) in the
-  shell that runs `modal deploy` to change it. Like `WWJD_APP_NAME` it is read when the file
-  is imported, and any other value fails the import, so a typo fails the deploy instead of
-  removing the cap. Requests beyond the cap queue in Modal: under load they wait longer and
+  The default is 2, and an empty or unset `WWJD_MAX_GPU_CONTAINERS` means the default; set it
+  (a whole number of at least 1) in the shell that runs `modal deploy` to change it. Like
+  `WWJD_APP_NAME` it is read when the file is imported, and any other value fails the
+  import, so a typo fails the deploy instead of removing the cap. There is no upper bound, so
+  a large value effectively removes the cap. The cap is per app: a test deploy with its own
+  `WWJD_APP_NAME` runs its own containers on top of production's. Requests beyond the cap queue in Modal: under load they wait longer and
   may get the `303` or Modal's timeout response (see API contract).
 - `MAX_PROMPT_TOKENS` (6144): the full prompt, template included, is tokenized and refused
   over the cap before generation. Measured with the cached Mistral-7B-Instruct-v0.2
@@ -139,9 +142,12 @@ caps bound that cost:
   tokens, so all of these fit. Byte fallback is refused: rare CJK characters take about 3
   tokens each (12242) and characters outside the vocabulary, such as U+20000, about 4
   (16242). Prompt plus the 500 generated tokens stays under 6,700 of the model's 32,768.
-- `MAX_BODY_BYTES` (65536): `verse_api` stops reading a body past 64 KiB and answers `413`.
-  The 4000 character text, even at the worst JSON escape of 12 bytes per character, fits
-  in 48,000 bytes.
+- `MAX_BODY_BYTES` (65536): `verse_api` answers `413` for a declared `Content-Length` over
+  the cap without reading the body, and otherwise stops reading at the first chunk that takes
+  the total past the cap, so it never parses more than 64 KiB. Modal delivers the body in
+  chunks it sizes itself, so the bytes received can pass the cap by up to one chunk. The 4000
+  character text, even at the worst JSON escape of 12 bytes per character, fits in 48,000
+  bytes.
 
 These caps do not bound the total spend over time. Set a spend limit in the Modal workspace
 settings as well; this repo does not change Modal settings.
@@ -172,7 +178,8 @@ parsed as JSON whatever the `Content-Type` header says.
 | `text` is empty or only whitespace | `422` | `{"error": "The 'text' field must be a non-empty string.", "id": "<id>"}` |
 | `text` is longer than 4000 characters (`MAX_TEXT_LENGTH`, counted with `len(text)`; whitespace-only text of any length is the empty-text case above) | `422` | `{"error": "The 'text' field must be at most 4000 characters.", "id": "<id>"}`, returned before any GPU work; the text is not echoed back |
 | Body larger than 65536 bytes (`MAX_BODY_BYTES`), by its `Content-Length` or by the bytes actually read | `413` | `{"error": "The request body must be at most 65536 bytes.", "id": "<id>"}`, returned before any JSON parsing or GPU work |
-| Body is not valid JSON, `text` key missing, or the body is not valid for `{"text": str}` | `422` | FastAPI's default validation error (`{"detail": [...]}`); for invalid JSON it is FastAPI's own `json_invalid` error |
+| Body is empty, is not valid JSON (including whitespace only), has no `text` key, or is not valid for `{"text": str}` | `422` | FastAPI's default validation error (`{"detail": [...]}`), the same errors FastAPI itself gives: `missing` for an empty body, `json_invalid` (with `input` `{}`) for invalid JSON, pydantic's errors otherwise |
+| Body cannot be decoded at all: invalid UTF-8, nesting too deep, or an integer over Python's digit limit | `400` | `{"detail": "There was an error parsing the body"}`, FastAPI's own response for this case |
 | The full prompt is longer than 6144 tokens (`MAX_PROMPT_TOKENS`) | `422` | `{"error": "The 'text' field is too long for the model; select less text.", "id": "<id>"}`, returned before generation; the text is not echoed back |
 | The model output cannot be parsed into three non-empty string fields, even by the fallback | `502` | `{"error": "The model returned a response that could not be parsed.", "id": "<id>"}` |
 | Any exception while calling `MatchVerse.match`, including a container whose enter hook fails (that call fails only once Modal escalates the crash loop to input failures, so a `303` can come first, or Modal's timeout response if escalation outlasts `timeout=600`) | `500` | `{"error": "Internal error while processing the request.", "id": "<id>"}` |
@@ -246,9 +253,11 @@ By default each request logs metadata only:
 
 The user text, the prompt and the model output are never logged by default. The bodies this
 code builds (`413`, `422` for empty, too-long or too-many-token text, `500`, `502`) never hold exception text or model output,
-whatever the setting. FastAPI's own validation `422` (for a body that does not fit
-`{"text": str}`) can repeat the submitted body back to the same client; this code does not log
-it.
+whatever the setting. The `{"detail": [...]}` `422` and the `400` are raised by this code
+(`_parse_verse_request`) as FastAPI's own exception types and rendered by FastAPI's handlers.
+Their errors come from pydantic and the JSON decoder: the messages are fixed parser phrases,
+and a pydantic error's `input` holds the submitted value (for example a non-string `text`),
+which goes back only to the same client and is never logged.
 
 For debugging, set `WWJD_LOG_FULL_TEXT=1` in the shell that runs `modal serve` or
 `modal deploy`. It is copied into the env of both images (`image` and `api_image`), so both containers log the full user text,
