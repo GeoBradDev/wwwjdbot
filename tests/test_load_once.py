@@ -385,3 +385,16 @@ def test_verse_api_rejects_over_long_text_before_the_gpu_call(app_module, monkey
     assert response.status_code == 422
     assert response.content["error"] == app_module.ERROR_TEXT_TOO_LONG
     assert match.calls == []
+
+
+def test_verse_api_accepts_20_concurrent_inputs_and_the_gpu_class_does_not():
+    function = _function_def("verse_api")
+    # app.function must stay outermost; Modal raises if concurrent is above it.
+    assert _decorator_names(function) == [
+        "app.function",
+        "modal.concurrent",
+        "modal.fastapi_endpoint",
+    ]
+    call = _decorator_call(function, "modal.concurrent")
+    assert {k.arg: ast.literal_eval(k.value) for k in call.keywords} == {"max_inputs": 20}
+    assert "modal.concurrent" not in _decorator_names(_class_def("MatchVerse"))
