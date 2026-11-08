@@ -101,7 +101,7 @@ def test_parse_rejects_lone_surrogate(app_module, generated):
 
 def test_handler_rejects_lone_surrogate_with_502(app_module):
     result = {"reference": "A", "verse": "lone \ud800", "explanation": "C"}
-    status, body = app_module.handle_verse_request("Some statement", lambda text: result)
+    status, body = app_module.handle_verse_request("Some statement", lambda text, request_id=None: result)
     assert status == 502
     assert body["error"] == app_module.ERROR_UNPARSEABLE
 
@@ -120,7 +120,7 @@ def test_handler_rejects_lone_surrogate_with_502(app_module):
 )
 def test_handler_200_payloads_render_with_starlette_json(app_module, generated, expected_status):
     status, body = app_module.handle_verse_request(
-        "Some statement", lambda text: _parse(app_module, generated)
+        "Some statement", lambda text, request_id=None: _parse(app_module, generated)
     )
     assert status == expected_status
     _starlette_render(body)

@@ -147,10 +147,13 @@ Raising after the `except` block (not inside it) leaves `__context__` empty. `ma
 ```python
 def match_verse(text: str, request_id: str | None = None):
     request_id = _normalize_request_id(request_id)
-    return _run_guarded(request_id, _generate_verse, text, request_id)
+    token = os.environ.get("HUGGINGFACE_TOKEN")
+    if not token:
+        raise RuntimeError("HUGGINGFACE_TOKEN is not set; attach the huggingface-token Modal Secret")
+    return _run_guarded(request_id, _generate_verse, text, request_id, token)
 ```
 
-and the current body (imports, token check, model load, generation) moves unchanged into a module-level `_generate_verse(text, request_id)`, except the five `print` lines, which become one call:
+and the rest of the current body (imports, model load, generation) moves unchanged into a module-level `_generate_verse(text, request_id, token)`, except the five `print` lines, which become one call:
 
 ```python
 return _log_generation(request_id, text, prompt, generated_text, elapsed_time, model_name)
@@ -170,13 +173,14 @@ def _log_generation(request_id, text, prompt, generated_text, elapsed_time, mode
     return result
 ```
 
-The token check's `RuntimeError` is still raised inside `_generate_verse`, so it is logged (type plus frames) and surfaces as `MatchVerseError`. The return value of `match_verse` is unchanged, including `raw_output` on a parse failure, which `handle_verse_request` never sends to the client.
+Departure found during implementation: the token check stays in `match_verse`, before the guard, and still raises its own `RuntimeError`. The existing `tests/test_review_fixes.py::test_missing_hf_token_fails_loudly` asserts `pytest.raises(RuntimeError, match="HUGGINGFACE_TOKEN")`, which a `MatchVerseError` carrying only the request id would fail. The message is a fixed string with no user text, so letting it propagate keeps criterion 7's guarantee (no user text in what leaves `match_verse`). The return value of `match_verse` is unchanged, including `raw_output` on a parse failure, which `handle_verse_request` never sends to the client.
 
 ## Files that change
 
 - `wwjd_bot_modal.py`: logger, flag, safe exception logging, request id plumbing, `_generate_verse`, `_log_generation`, `_run_guarded`, `MatchVerseError`; all `print` calls removed.
 - `tests/test_logging.py` (new): the tests in Proof.
 - `tests/test_verse_api.py`: the `_Match` fake's `__call__` gains `request_id=None` and records it in a new `self.request_ids` list. Existing assertions stay as they are (`calls` still records only the text). Required because `handle_verse_request` now calls `match(text, request_id=...)`; this extends the fake, it does not weaken any assertion.
+- `tests/test_parse_review_fixes.py`, `tests/test_parse_review_fixes_4.py`, `tests/test_parse_review_fixes_6.py` (departure found during implementation): their one-argument `lambda text: ...` fakes for `match` become `lambda text, request_id=None: ...`, for the same reason as the `_Match` change. No assertion changes.
 - `README.md`: new "Logging and data handling" section; API contract sentence about ids in logs updated.
 - This plan.
 
