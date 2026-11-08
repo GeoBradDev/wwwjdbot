@@ -160,14 +160,16 @@ def fake_torch(monkeypatch):
 
 
 def test_max_prompt_tokens_constant(app_module):
-    assert app_module.MAX_PROMPT_TOKENS == 4096
+    assert app_module.MAX_PROMPT_TOKENS == 6144
     assert app_module.ERROR_TOO_MANY_TOKENS == "The 'text' field is too long for the model; select less text."
 
 
-@pytest.mark.parametrize("length", [1, 4095, 4096])
-def test_tokenize_capped_returns_the_inputs_within_the_cap(app_module, length):
+@pytest.mark.parametrize("below_cap", [None, 1, 0])
+def test_tokenize_capped_returns_the_inputs_within_the_cap(app_module, below_cap):
+    cap = app_module.MAX_PROMPT_TOKENS
+    length = 1 if below_cap is None else cap - below_cap
     tokenizer = _Tokenizer(length)
-    inputs, count = app_module._tokenize_capped(tokenizer, "a prompt", 4096)
+    inputs, count = app_module._tokenize_capped(tokenizer, "a prompt", cap)
     assert inputs is not None
     assert inputs.input_ids.shape == (1, length)
     assert count == length
@@ -175,15 +177,16 @@ def test_tokenize_capped_returns_the_inputs_within_the_cap(app_module, length):
 
 
 def test_tokenize_capped_returns_none_over_the_cap(app_module):
-    tokenizer = _Tokenizer(4097)
-    inputs, count = app_module._tokenize_capped(tokenizer, "a prompt", 4096)
+    cap = app_module.MAX_PROMPT_TOKENS
+    tokenizer = _Tokenizer(cap + 1)
+    inputs, count = app_module._tokenize_capped(tokenizer, "a prompt", cap)
     assert inputs is None
-    assert count == 4097
+    assert count == cap + 1
     assert tokenizer.calls == [("a prompt", "pt")]
 
 
 def test_generate_verse_at_the_cap_generates(app_module, fake_torch):
-    tokenizer, model = _Tokenizer(4096), _Model()
+    tokenizer, model = _Tokenizer(app_module.MAX_PROMPT_TOKENS), _Model()
     result = app_module._generate_verse(tokenizer, model, "Some statement", "0" * 32)
     assert model.generate_calls == 1
     assert {k: result[k] for k in ("reference", "verse", "explanation")} == GOOD_RAW["raw"]
@@ -191,7 +194,8 @@ def test_generate_verse_at_the_cap_generates(app_module, fake_torch):
 
 
 def test_generate_verse_over_the_cap_never_generates(app_module, fake_torch, caplog):
-    tokenizer, model = _Tokenizer(4097), _Model()
+    cap = app_module.MAX_PROMPT_TOKENS
+    tokenizer, model = _Tokenizer(cap + 1), _Model()
     text = SENTINEL + " more words"
     request_id = "0123456789abcdef0123456789abcdef"
     result = app_module._generate_verse(tokenizer, model, text, request_id)
@@ -200,12 +204,12 @@ def test_generate_verse_over_the_cap_never_generates(app_module, fake_torch, cap
     assert SENTINEL not in caplog.text
     assert (
         f"[{request_id}] rejected: reason=input_too_long input_length={len(text)} "
-        "prompt_tokens=4097 max_prompt_tokens=4096"
+        f"prompt_tokens={cap + 1} max_prompt_tokens={cap}"
     ) in caplog.text
 
 
 def test_input_too_long_passes_through_run_guarded(app_module, fake_torch):
-    tokenizer, model = _Tokenizer(5000), _Model()
+    tokenizer, model = _Tokenizer(app_module.MAX_PROMPT_TOKENS + 1), _Model()
     result = app_module._run_guarded(
         "0" * 32, app_module._generate_verse, tokenizer, model, "x", "0" * 32
     )
